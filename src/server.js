@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 
 import { runCommand, getRunStatus, cancelRun, diagnose } from './runner.js'
 import { createClient } from './github.js'
+import { publishWorkspace, inspectBuildBranch, resetBuildBranch } from './snapshot.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'))
@@ -99,8 +100,62 @@ const TOOLS = [
           type: 'number',
           description: '返回输出截断长度，默认 24000 字符。',
         },
+        workspaceDir: {
+          type: 'string',
+          description:
+            '本地 git 工作区目录。设置后进入「快照模式」：把该目录**未提交的改动**发布到目标仓库的专用构建分支后构建。' +
+            '只有改动的文件会上传（GitHub 侧的基线树由 base_tree 拼接），所以仓库再大也不慢。',
+        },
+        workspaceBranch: {
+          type: 'string',
+          description: '快照构建分支名，默认 build-runner。同一仓库复用，不污染日常分支。',
+        },
       },
       required: ['repo', 'command'],
+    },
+  },
+  {
+    name: 'prepare_workspace',
+    description:
+      '把本地工作区的未提交改动发布到目标仓库的专用构建分支（不建快照 commit 之外的东西，也不动你的分支）。' +
+      '只上传改动文件：其余内容由 GitHub 用 base_tree 在服务端拼接。' +
+      'dryRun=true 可先看会传哪些文件、多少字节，再决定是否真要发布。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: '目标仓库 owner/name' },
+        dir: { type: 'string', description: '本地 git 工作区目录' },
+        baseRef: { type: 'string', description: '本地改动所基于的分支/标签/SHA，默认 main' },
+        branch: { type: 'string', description: '构建分支名，默认 build-runner' },
+        message: { type: 'string', description: '快照 commit 的说明' },
+        dryRun: { type: 'boolean', description: '只统计不上传，默认 false' },
+      },
+      required: ['repo', 'dir'],
+    },
+  },
+  {
+    name: 'workspace_status',
+    description: '查看目标仓库的构建分支当前指向哪个 commit（不修改任何东西）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: '目标仓库 owner/name' },
+        branch: { type: 'string', description: '构建分支名，默认 build-runner' },
+      },
+      required: ['repo'],
+    },
+  },
+  {
+    name: 'workspace_reset',
+    description: '把构建分支重置回某个基准分支，清掉累积的历史（构建分支会被长期保留）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: '目标仓库 owner/name' },
+        baseRef: { type: 'string', description: '重置到的基准分支，默认 main' },
+        branch: { type: 'string', description: '构建分支名，默认 build-runner' },
+      },
+      required: ['repo'],
     },
   },
   {
@@ -155,6 +210,31 @@ async function invoke(toolName, args = {}) {
         wait: args.wait !== false,
         maxWaitMs: args.maxWaitMs,
         maxOutputChars: args.maxOutputChars,
+        workspaceDir: args.workspaceDir,
+        workspaceBranch: args.workspaceBranch,
+      })
+    }
+    case 'prepare_workspace': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      return await publishWorkspace(client, {
+        dir: args.dir,
+        repo: args.repo,
+        baseRef: args.baseRef ?? 'main',
+        branch: args.branch ?? 'build-runner',
+        message: args.message,
+        dryRun: args.dryRun === true,
+      })
+    }
+    case 'workspace_status': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      return await inspectBuildBranch(client, { repo: args.repo, branch: args.branch ?? 'build-runner' })
+    }
+    case 'workspace_reset': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      return await resetBuildBranch(client, {
+        repo: args.repo,
+        baseRef: args.baseRef ?? 'main',
+        branch: args.branch ?? 'build-runner',
       })
     }
     case 'status': {
@@ -186,6 +266,46 @@ function render(value) {
     return lines.join('\n')
   }
 
+  // workspace publishing result
+  if (value && typeof value === 'object' && 'changed' in value && !('conclusion' in value)) {
+    const lines = []
+    if (value.published === false && value.dryRun) {
+      lines.push(`🔍 干跑：将上传 ${value.changed} 个改动文件`)
+    } else if (value.published === false) {
+      lines.push(`ℹ️ 工作区干净：${value.note ?? '没有未提交改动'}`)
+    } else {
+      lines.push(`📤 已发布快照：${value.changed} 个改动 → ${value.branch}`)
+    }
+    lines.push(`仓库 ${value.repo}  基准 ${value.baseRef} → ${String(value.baseSha).slice(0, 7)}`)
+    if (value.sha) lines.push(`快照 commit ${String(value.sha).slice(0, 7)}`)
+    if (value.summary) {
+      const s = value.summary
+      lines.push(
+        `改动统计：新增 ${s.added}、修改 ${s.modified}、删除 ${s.deleted}、重命名 ${s.renamed}` +
+          (value.uploadedBytes ? `，上传 ${(value.uploadedBytes / 1024).toFixed(1)} KiB` : '')
+      )
+    }
+    if (Array.isArray(value.files) && value.files.length > 0) {
+      lines.push('', '----- 将上传 -----')
+      for (const file of value.files.slice(0, 50)) {
+        lines.push(`${file.kind.padEnd(9)} ${file.path}${file.size ? ` (${file.size} B)` : ''}`)
+      }
+      if (value.files.length > 50) lines.push(`… 另有 ${value.files.length - 50} 个`)
+    }
+    return lines.join('\n')
+  }
+
+  if (value && typeof value === 'object' && 'exists' in value) {
+    if (!value.exists) return `构建分支 ${value.branch} 尚未创建（${value.repo}）`
+    return [
+      `构建分支 ${value.branch} → ${String(value.sha).slice(0, 7)}`,
+      `仓库 ${value.repo}`,
+      `说明 ${value.message ?? '-'}`,
+      `时间 ${value.date ?? '-'}`,
+      `链接 ${value.url}`,
+    ].join('\n')
+  }
+
   if (value && typeof value === 'object' && 'conclusion' in value && 'output' in value) {
     const lines = []
     const verdict =
@@ -198,6 +318,13 @@ function render(value) {
             : '⏳ 未完成'
     lines.push(`${verdict}  exit=${value.exitCode ?? 'n/a'}  ${value.durationSeconds ?? '?'}s`)
     lines.push(`仓库 ${value.repo ?? '?'} @ ${value.ref ?? '?'}${value.revision ? ` (${value.revision})` : ''}`)
+    if (value.mode === 'snapshot' && value.workspace) {
+      const ws = value.workspace
+      lines.push(
+        `⚠️ 快照模式：包含 ${ws.changed} 处未提交改动（基准 ${String(ws.baseSha).slice(0, 7)}，` +
+          `已传到分支 ${ws.branch}）。这是预检结果，不等同于已推送代码的构建。`
+      )
+    }
     if (value.runUrl) lines.push(`运行 ${value.runUrl}`)
     lines.push('')
     lines.push('----- 输出 -----')
