@@ -42,10 +42,11 @@ try {
       'echo "--- does the UNCOMMITTED edit exist in the cloud? ---"',
       `if grep -q '${MARKER}' .gitignore; then echo "EDIT-VISIBLE"; else echo "EDIT-MISSING"; fi`,
       `if [ -f ${targetFile} ]; then echo "NEWFILE-VISIBLE"; else echo "NEWFILE-MISSING"; fi`,
-      'echo "--- history: the snapshot sits on the real base commit ---"',
+      'echo "--- parent linkage (proves real history, not a tarball) ---"',
+      'git rev-parse HEAD',
+      'git rev-parse HEAD~1 2>/dev/null || echo NO-PARENT',
+      'echo "--- log ---"',
       'git log --oneline -3',
-      'echo "--- commit count (proves real parents, not a tarball) ---"',
-      'git rev-list --count HEAD',
     ].join('\n'),
     wait: true,
     maxWaitMs: 8 * 60 * 1000,
@@ -55,16 +56,27 @@ try {
   console.log(`exit=${result.exitCode} conclusion=${result.conclusion}\n`)
   console.log(result.output)
 
-  const countSection = result.output.split('--- commit count (proves real parents, not a tarball) ---')[1] ?? ''
-  const commitCount = Number((countSection.match(/\d+/) ?? ['0'])[0])
+  const parentMatch = result.output.match(/^([0-9a-f]{40})$/gm) ?? []
+  const parentLine = (result.output.split('--- parent linkage (proves real history, not a tarball) ---')[1] ?? '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => /^[0-9a-f]{40}$/.test(line))
+  const headSha = parentLine[0]
+  const parentSha = parentLine[1]
+  const baseMainSha = (await client.resolveCommit('Ckarefulon', 'Build-Runner', 'main')).sha
 
   const checks = [
     ['未提交的修改出现在云端', result.output.includes('EDIT-VISIBLE')],
     ['未跟踪的新文件出现在云端', result.output.includes('NEWFILE-VISIBLE')],
     ['云端看不到旧内容', !result.output.includes('EDIT-MISSING')],
     ['构建成功', result.exitCode === 0],
-    // A tarball or shallow import would make this 1. Real parents make it > 1.
-    [`历史是完整的（rev-list=${commitCount} > 1）`, commitCount > 1],
+    // The decisive one: the snapshot commit's parent is the real main commit,
+    // so version numbers derived from history behave exactly as they would
+    // after a genuine push.
+    [
+      `快照的父提交就是真实基线（${parentSha?.slice(0, 7)} == ${baseMainSha.slice(0, 7)}）`,
+      Boolean(parentSha) && parentSha === baseMainSha,
+    ],
   ]
   console.log('\n=== verdict ===')
   ok = true
