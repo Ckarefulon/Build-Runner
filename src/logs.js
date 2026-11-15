@@ -90,13 +90,21 @@ export function parseJobLog(raw) {
   const shellMatch = joined.match(MARKERS.shell)
 
   // The Report step prints `key=value` pairs; collect them so the caller can
-  // prove which revision actually ran.
+  // prove which revision actually ran. GitHub echoes the step script first, so
+  // anchor on the LAST occurrence of the report banner — the printed one.
   const report = {}
-  const reportAt = lines.findIndex(line => line.includes(MARKERS.report))
+  let reportAt = -1
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].includes(MARKERS.report)) {
+      reportAt = i
+      break
+    }
+  }
   if (reportAt !== -1) {
     for (let i = reportAt + 1; i < lines.length; i += 1) {
-      const line = lines[i]
-      if (line.includes('=====')) break
+      const line = lines[i].replace(ANSI, '').trim()
+      // The closing banner is a run of '=' with no key in front of it.
+      if (/^=+$/.test(line) || line.startsWith('====')) break
       const eq = line.indexOf('=')
       if (eq > 0) report[line.slice(0, eq).trim()] = line.slice(eq + 1).trim()
     }
