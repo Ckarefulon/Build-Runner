@@ -108,7 +108,10 @@ jobs:
           repository: ${{ steps.t.outputs.repo }}
           ref: ${{ steps.t.outputs.ref }}
           token: ${{ secrets.checkout_token || github.token }}
-          fetch-depth: ${{ steps.t.outputs.depth }}
+          # `steps.t.outputs.depth` is a string; passing "0" through fromJSON
+          # yields 0 which checkout treats as unlimited, but an empty/odd value
+          # falls back to 1. Compare explicitly so "0" means full history.
+          fetch-depth: ${{ steps.t.outputs.depth == '0' && '0' || steps.t.outputs.depth }}
           persist-credentials: false
 
       - name: Record revision
