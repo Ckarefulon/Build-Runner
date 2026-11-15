@@ -310,20 +310,26 @@ export function createClient({ token, baseUrl = API } = {}) {
 
     /** Create a ref, or move an existing one. Force is required to move. */
     async upsertRef(owner, repo, ref, sha, { force = true } = {}) {
-      const target = ref.replace(/^\/+/, '')
-      let existing = null
+      const branch = ref.replace(/^\/+/, '').replace(/^heads\//, '')
+      // Read both "heads/<b>" (current) and the legacy "refs/heads" form through
+      // the refs collection: the singular /git/ref/<x> endpoint 404s on some
+      // names, and a false 404 here makes the create below fail with
+      // "Reference already exists" on every subsequent publish.
+      let exists = false
       try {
-        existing = await request('GET', `/repos/${owner}/${repo}/git/ref/${target}`)
+        await request('GET', `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(branch)}`)
+        exists = true
       } catch (error) {
         if (!(error instanceof GitHubError) || error.status !== 404) throw error
       }
-      if (existing) {
-        return request('PATCH', `/repos/${owner}/${repo}/git/refs/${target}`, {
+
+      if (exists) {
+        return request('PATCH', `/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
           body: { sha, force },
         })
       }
       return request('POST', `/repos/${owner}/${repo}/git/refs`, {
-        body: { ref: `refs/heads/${target}`, sha },
+        body: { ref: `refs/heads/${branch}`, sha },
       })
     },
 
