@@ -30,33 +30,20 @@ function git(dir, args) {
 async function main() {
   console.log(`target ${repo}@${baseRef}\n`)
 
-  // Build a throwaway clone so the test never touches a real working copy.
-  // A clone of a large repo would be slow, so clone shallow.
-  const dir = mkdtempSync(join(tmpdir(), 'br-snap-'))
-  const cloneUrl = `https://github.com/${repo}.git`
-  console.log(`cloning ${cloneUrl} (depth 1) ...`)
+  // Use an existing local clone. `git clone` is not an option on this machine
+  // (the HTTPS proxy CA is untrusted by every git TLS backend), and a real
+  // working copy is what the feature is actually used against anyway.
+  const dir = process.argv[4] ?? process.cwd()
 
-  try {
-    execFileSync('git', ['clone', '--depth', '1', '--branch', baseRef, cloneUrl, dir], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-      env: {
-        ...process.env,
-        // The snapshot path only needs the clone; local TLS to github is broken
-        // on this machine, so hand git a token header instead of relying on the
-        // credential helper.
-        GIT_TERMINAL_PROMPT: '0',
-      },
-    })
-  } catch (error) {
-    const detail = error.stderr ? error.stderr.toString().slice(0, 300) : error.message
-    console.log(`clone failed: ${detail}`)
-    rmSync(dir, { recursive: true, force: true })
+  // This test must not disturb the caller's working tree: it edits files, so it
+  // refuses to run unless that is explicitly accepted.
+  if (process.env.SNAPSHOT_E2E_ALLOW_DIRTY !== '1') {
+    console.log('需要显式允许修改工作区：设置 SNAPSHOT_E2E_ALLOW_DIRTY=1')
     process.exit(1)
   }
 
-  let result
-  try {
-    console.log('clone ok')
+  {
+    console.log(`using working tree: ${dir}`)
 
     // The whole point: edit a tracked file and DO NOT COMMIT.
     const targetFile = existsSync(join(dir, 'SNAPSHOT_PROBE.txt'))
@@ -95,7 +82,7 @@ async function main() {
         `echo "searching for marker ${MARKER}"`,
         `if grep -q '${MARKER}' ${targetFile}; then echo "FOUND-EDITED-CONTENT"; else echo "MISSING-EDITED-CONTENT"; fi`,
         `if [ -f snapshot-new-file.txt ]; then echo "FOUND-NEW-FILE"; cat snapshot-new-file.txt; else echo "MISSING-NEW-FILE"; fi`,
-        'echo "--- parent of HEAD (proves real history) ---"',
+        'echo "--- history (proves the snapshot sits on the real base commit) ---"',
         'git log --oneline -2 2>/dev/null || true',
       ].join('\n'),
       wait: true,
@@ -106,8 +93,13 @@ async function main() {
     console.log(`\nexit=${result.exitCode} conclusion=${result.conclusion}`)
     console.log('--- remote output ---')
     console.log(result.output)
+
+    // Restore the working tree so running the test does not leave junk behind.
+    writeFileSync(join(dir, targetFile), original)
+    rmSync(join(dir, 'snapshot-new-file.txt'), { force: true })
+    console.log('\nworking tree restored')
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    // Nothing to clean: the tree was restored above.
   }
 
   const checks = [
