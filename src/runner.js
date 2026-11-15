@@ -175,12 +175,18 @@ export async function runCommand(client, options) {
     await verifyRef(context, { owner: target.owner, repo: target.repo, ref: target.ref })
   }
 
+  // In snapshot mode the run must check out the BRANCH, never the raw SHA:
+  // actions/checkout given a SHA fetches that single commit even at
+  // fetch-depth 0, so `git describe`/`rev-list --count` inside the build would
+  // see orphaned history — the exact discrepancy this mode exists to avoid.
+  const checkoutRef = workspace ? workspace.branch : effectiveRef
+
   const tag = `br-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`
   const createdAt = Date.now()
   const inputs = {
     tag,
     repo: target.slug,
-    ref: effectiveRef,
+    ref: checkoutRef,
     command,
     shell: normalizedShell,
     runner,
@@ -206,7 +212,7 @@ export async function runCommand(client, options) {
   const receipt = {
     tag,
     repo: target.slug,
-    ref: effectiveRef,
+    ref: checkoutRef,
     shell: normalizedShell,
     runner,
     command,
