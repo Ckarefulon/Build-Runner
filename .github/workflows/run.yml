@@ -118,10 +118,15 @@ jobs:
           set +e
           set +o pipefail
           sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short HEAD)
+          subject=$(git log -1 --pretty=%s)
+          author=$(git log -1 --pretty='%an <%ae>')
+          date=$(git log -1 --pretty=%ad)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          echo "Checked out $sha ($(git log -1 --pretty=%s))"
-          git log -1 --pretty='author: %an <%ae>%ndate:   %ad'
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "Checked out $sha ($subject)"
+          echo "author: $author"
+          echo "date:   $date"
           exit 0
 
       # ------------------------------------------------------------------ cache --
