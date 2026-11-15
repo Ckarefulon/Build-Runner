@@ -12,7 +12,7 @@
  *      stats, it does not hash a 5000-file tree).
  *   3. Upload ONLY those blobs.
  *   4. Ask GitHub to build a tree from `base_tree` = the base commit's tree plus
- *      those entries. GitHub stitches the untouched 4997 files in server-side.
+ *      those entries. GitHub stitches the untouched files in server-side.
  *   5. Create a commit whose parent is the real base commit, and point a
  *      permanent build branch at it.
  *
@@ -60,7 +60,11 @@ export async function publishWorkspace(client, options) {
 
   const info = repoInfo(dir)
   const remoteSlug = parseRemote(info.remote)
-  if (remoteSlug && `${remoteSlug.owner}/${remoteSlug.repo}`.toLowerCase() !== `${target.owner}/${target.repo}`.toLowerCase()) {
+  if (
+    remoteSlug &&
+    `${remoteSlug.owner}/${remoteSlug.repo}`.toLowerCase() !==
+      `${target.owner}/${target.repo}`.toLowerCase()
+  ) {
     throw new Error(
       `本地仓库的 origin 是 ${remoteSlug.owner}/${remoteSlug.repo}，与目标 ${target.owner}/${target.repo} 不一致。` +
         '请确认 repo 参数，或检查目录是否选对。'
@@ -72,7 +76,7 @@ export async function publishWorkspace(client, options) {
 
   // Resolve the base commit on the remote. Prefer the caller's ref so the
   // published commit sits on top of the branch the author actually worked from.
-  const baseCommit = await client.getCommit(target.owner, target.repo, baseRef)
+  const baseCommit = await client.resolveCommit(target.owner, target.repo, baseRef)
 
   if (changes.length === 0) {
     return {
@@ -118,17 +122,21 @@ export async function publishWorkspace(client, options) {
   }
 
   const newTree = await client.createTree(target.owner, target.repo, {
-    baseTree: baseCommit.commit.tree.sha,
+    baseTree: baseCommit.tree.sha,
     tree,
   })
 
+  const changedList = changes
+    .map(change => `${change.kind[0]}:${change.path}`)
+    .slice(0, 20)
+    .join(', ')
   const commit = await client.createCommit(target.owner, target.repo, {
     message:
       message ??
       `build-runner: workspace snapshot (${summary.total} 处改动)\n\n` +
         `base: ${baseRef} @ ${baseCommit.sha.slice(0, 7)}\n` +
-        `files: ${changes.map(change => `${change.kind[0]}:${change.path}`).slice(0, 20).join(', ')}` +
-        (changes.length > 20 ? ` …(+${changes.length - 20})` : ''),
+        `files: ${changedList}` +
+        (changes.length > 20 ? ` ...(+${changes.length - 20})` : ''),
     tree: newTree.sha,
     parents: [baseCommit.sha],
     author,
@@ -160,9 +168,14 @@ export async function publishWorkspace(client, options) {
 export async function resetBuildBranch(client, { repo, baseRef, branch = buildBranchName() }) {
   const target = parseSlug(repo)
   if (!target) throw new Error(`无法解析目标仓库：${repo}`)
-  const baseCommit = await client.getCommit(target.owner, target.repo, baseRef)
+  const baseCommit = await client.resolveCommit(target.owner, target.repo, baseRef)
   await client.upsertRef(target.owner, target.repo, branch, baseCommit.sha, { force: true })
-  return { repo: `${target.owner}/${target.repo}`, branch, sha: baseCommit.sha, note: '构建分支已重置到 baseRef' }
+  return {
+    repo: `${target.owner}/${target.repo}`,
+    branch,
+    sha: baseCommit.sha,
+    note: '构建分支已重置到 baseRef',
+  }
 }
 
 /** Inspect the build branch without changing anything. */
