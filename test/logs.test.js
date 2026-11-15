@@ -66,6 +66,25 @@ test('reads the report block', () => {
   assert.equal(result.report.job_status, 'success')
 })
 
+test('ignores the echoed report script and reads the printed banner', () => {
+  // GitHub echoes the Report step's script first; those `echo "repo=$..."` lines
+  // must not be mistaken for the real values.
+  const withEcho = [
+    line('##[group]Run echo "================ BUILD-RUNNER-REPORT-V1 ================"'),
+    line('\u001b[36;1mecho "repo=$TARGET_REPO"\u001b[0m'),
+    line('\u001b[36;1mecho "sha=$TARGET_SHA"\u001b[0m'),
+    line('##[endgroup]'),
+    line('================ BUILD-RUNNER-REPORT-V1 ================'),
+    line('repo=Ckarefulon/Build-Runner'),
+    line('sha=abc1234'),
+    line('========================================================'),
+  ].join('\n')
+  const result = parseJobLog(withEcho)
+  assert.equal(result.report.sha, 'abc1234')
+  assert.equal(result.report.repo, 'Ckarefulon/Build-Runner')
+  assert.equal(result.report['$TARGET_REPO'], undefined)
+})
+
 test('a non-zero exit code survives the round trip', () => {
   const result = parseJobLog(FIXTURE.replace('EXIT-CODE=0', 'EXIT-CODE=42'))
   assert.equal(result.exitCode, 42)
