@@ -221,6 +221,54 @@ export function createClient({ token, baseUrl = API } = {}) {
 
     getCommit: (owner, repo, sha) => request('GET', `/repos/${owner}/${repo}/git/commits/${sha}`),
 
+    /**
+     * Resolve a branch/tag/SHA to a commit object.
+     * `/git/commits/{ref}` only accepts a SHA, so a branch name has to go
+     * through the refs endpoint first — the difference is a 404 that looks
+     * exactly like "repository not found".
+     */
+    async resolveCommit(owner, repo, ref) {
+      if (/^[0-9a-f]{40}$/i.test(ref)) {
+        return request('GET', `/repos/${owner}/${repo}/git/commits/${ref}`)
+      }
+      let sha = null
+      try {
+        const branchRef = await request(
+          'GET',
+          `/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(ref)}`
+        )
+        sha = branchRef.object.sha
+      } catch (error) {
+        if (!(error instanceof GitHubError) || error.status !== 404) throw error
+      }
+      if (sha === null) {
+        try {
+          const tagRef = await request(
+            'GET',
+            `/repos/${owner}/${repo}/git/ref/tags/${encodeURIComponent(ref)}`
+          )
+          sha = tagRef.object.sha
+        } catch (error) {
+          if (!(error instanceof GitHubError) || error.status !== 404) throw error
+        }
+      }
+      if (sha === null) {
+        // Fall back to commits API, which also accepts a branch name or short sha.
+        const commit = await request(
+          'GET',
+          `/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`
+        )
+        sha = commit.sha
+      }
+      // A tag ref may point at an annotated tag object; peel it to a real commit.
+      const object = await request('GET', `/repos/${owner}/${repo}/git/commits/${sha}`)
+      // The Git Data API returns { sha, message, tree: {...}, parents: [...] }.
+      if (!object?.tree?.sha) {
+        throw new GitHubError(`无法把 "${ref}" 解析成 commit 对象（缺少 tree）`, { body: object })
+      }
+      return object
+    },
+
     getTree: (owner, repo, sha, { recursive = false } = {}) =>
       request(
         'GET',
