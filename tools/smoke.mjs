@@ -60,9 +60,12 @@ async function main() {
   console.log(failRun.output.slice(0, 600))
 
   section('verdict')
+  // `ls -la` collapses the workdir into a `total`/`.` line, so assert on a file
+  // that only exists in the checked-out repo rather than on a literal path.
   const checks = [
     ['命令输出被取回', okRun.output.includes('hello from')],
-    ['工作目录是检出的仓库', okRun.output.includes('PWD=')],
+    ['工作目录是检出的仓库', okRun.output.includes('package.json')],
+    ['branch 被记录', okRun.report?.ref === 'main' || okRun.ref === 'main'],
     ['commit 被记录', typeof okRun.revision === 'string' && okRun.revision.length > 0],
     ['退出码 0 被正确捕获', okRun.exitCode === 0],
     ['非零退出码被正确捕获', failRun.exitCode === 42],
