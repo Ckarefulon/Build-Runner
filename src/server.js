@@ -177,6 +177,15 @@ async function invoke(toolName, args = {}) {
 
 /** Render a result as the text an AI can act on without a second lookup. */
 function render(value) {
+  // doctor: a checklist reads better than JSON.
+  if (value && Array.isArray(value.checks)) {
+    const lines = [`Build-Runner 自检：${value.ok ? '全部通过 ✅' : '存在问题 ❌'}`, '']
+    for (const check of value.checks) {
+      lines.push(`${check.ok ? '✅' : '❌'} ${check.name}: ${check.detail}`)
+    }
+    return lines.join('\n')
+  }
+
   if (value && typeof value === 'object' && 'conclusion' in value && 'output' in value) {
     const lines = []
     const verdict =
@@ -299,6 +308,11 @@ function main() {
 
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity })
 
+  // Requests are async (a cloud run can take minutes). Tracking them keeps a
+  // client that writes everything then closes stdin — which a piping caller
+  // does — from having its in-flight result discarded by the exit below.
+  const pending = new Set()
+
   rl.on('line', line => {
     const text = line.trim()
     if (text === '') return
@@ -309,16 +323,23 @@ function main() {
       log('无法解析的输入行，已忽略')
       return
     }
-    handle(message).catch(error => {
-      log(`处理 ${message?.method ?? '?'} 时异常：${error.stack ?? error.message}`)
-      if (message?.id !== undefined && message?.id !== null) {
-        replyError(message.id, -32603, error.message)
-      }
-    })
+    const task = handle(message)
+      .catch(error => {
+        log(`处理 ${message?.method ?? '?'} 时异常：${error.stack ?? error.message}`)
+        if (message?.id !== undefined && message?.id !== null) {
+          replyError(message.id, -32603, error.message)
+        }
+      })
+      .finally(() => pending.delete(task))
+    pending.add(task)
   })
 
-  rl.on('close', () => {
-    log('stdin closed, exiting')
+  rl.on('close', async () => {
+    if (pending.size > 0) {
+      log(`stdin closed, waiting for ${pending.size} in-flight request(s)`)
+      await Promise.allSettled([...pending])
+    }
+    log('exiting')
     process.exit(0)
   })
 }
