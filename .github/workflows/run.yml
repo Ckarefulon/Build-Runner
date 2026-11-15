@@ -1,0 +1,290 @@
+# Build-Runner — remote command execution engine.
+#
+# This is the CENTRAL engine: it lives in this repository and runs commands
+# against OTHER repositories, so no target repository needs a workflow file.
+# A caller dispatches this workflow with `repo` + `ref` + `command`; the job
+# checks the requested repository out and runs the command inside it.
+#
+# The MCP server in `mcp/` dispatches this, polls the run, and pulls the job
+# log back through the Actions logs API, so the calling AI sees stdout/stderr
+# and the real exit code exactly as if it had run the command locally.
+name: Build Runner
+
+# Every dispatch carries a unique `tag`. Stamping it into the run's display
+# title is the only reliable way for the caller to find the run it just
+# created: workflow_dispatch returns 204 with no run id, and two dispatches can
+# land in the same second.
+run-name: build-runner-${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Opaque caller-supplied id used to locate this run.'
+        required: false
+        default: ''
+      repo:
+        description: 'Target repository (owner/name). Empty means this runner repo.'
+        required: false
+        default: ''
+      ref:
+        description: 'Branch, tag or full commit SHA of the target repository.'
+        required: false
+        default: ''
+      command:
+        description: 'Shell command(s) to execute inside the checkout.'
+        required: true
+      shell:
+        description: 'Interpreter: bash | pwsh | python'
+        required: false
+        default: 'bash'
+      runner:
+        description: 'Runner label, e.g. ubuntu-latest / windows-latest / macos-latest.'
+        required: false
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Cap for the command step, in minutes (1-120).'
+        required: false
+        default: '30'
+      setup:
+        description: 'Optional pre-commands (install deps etc) run before the main command.'
+        required: false
+        default: ''
+      cache:
+        description: 'Dependency cache: auto | none'
+        required: false
+        default: 'auto'
+      artifact_paths:
+        description: 'Newline or comma separated paths to upload as artifacts.'
+        required: false
+        default: ''
+      fetch_depth:
+        description: 'git fetch depth (0 = full history)'
+        required: false
+        default: '1'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  CI: 'true'
+
+jobs:
+  run:
+    name: run command
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+    steps:
+      # ---------------------------------------------------------------- resolve --
+      - name: Resolve target
+        id: t
+        shell: bash
+        env:
+          IN_REPO: ${{ inputs.repo }}
+          IN_REF: ${{ inputs.ref }}
+          IN_DEPTH: ${{ inputs.fetch_depth }}
+          THIS_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          repo="${IN_REPO:-$THIS_REPO}"
+          ref="${IN_REF:-$DEFAULT_BRANCH}"
+          depth="${IN_DEPTH:-1}"
+          echo "repo=$repo"   >> "$GITHUB_OUTPUT"
+          echo "ref=$ref"     >> "$GITHUB_OUTPUT"
+          echo "depth=$depth" >> "$GITHUB_OUTPUT"
+          echo "Target repository : $repo"
+          echo "Target ref        : $ref"
+          echo "Fetch depth       : $depth"
+
+      # The target repository is usually PRIVATE, and the default GITHUB_TOKEN
+      # of THIS repo cannot read it. `checkout_token` is a secret holding a
+      # token that can. Absent it we fall back to the default token, which is
+      # enough for public targets and same-repository runs.
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.t.outputs.repo }}
+          ref: ${{ steps.t.outputs.ref }}
+          token: ${{ secrets.checkout_token || github.token }}
+          fetch-depth: ${{ steps.t.outputs.depth }}
+          persist-credentials: false
+
+      - name: Record revision
+        id: rev
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Checked out $sha ($(git log -1 --pretty=%s))"
+          git log -1 --pretty='author: %an <%ae>%ndate:   %ad'
+
+      # ------------------------------------------------------------------ cache --
+      # Auto-detect the package manager and reuse its store across runs. Without
+      # this every remote invocation pays a cold install, which is the single
+      # biggest reason a cloud run feels nothing like a local one.
+      - name: Detect caches
+        id: cache
+        shell: bash
+        env:
+          IN_CACHE: ${{ inputs.cache }}
+        run: |
+          set -uo pipefail
+          paths=""
+          key=""
+          if [ "${IN_CACHE:-auto}" != "none" ]; then
+            if   [ -f pnpm-lock.yaml ];      then paths="$HOME/.local/share/pnpm/store
+          $HOME/Library/pnpm/store
+          $HOME/AppData/Local/pnpm/store"; key="pnpm"
+            elif [ -f yarn.lock ];           then paths="$HOME/.cache/yarn"; key="yarn"
+            elif [ -f package-lock.json ];   then paths="$HOME/.npm";        key="npm"
+            elif [ -f gradle.properties ] || [ -f build.gradle.kts ] || [ -f build.gradle ]; then paths="$HOME/.gradle/caches
+          $HOME/.gradle/wrapper"; key="gradle"
+            elif [ -f pom.xml ];             then paths="$HOME/.m2/repository"; key="maven"
+            elif [ -f Cargo.toml ];          then paths="$HOME/.cargo/registry
+          $HOME/.cargo/git
+          target"; key="cargo"
+            elif [ -f requirements.txt ] || [ -f pyproject.toml ]; then paths="$HOME/.cache/pip"; key="pip"
+            elif [ -f go.mod ];              then paths="$HOME/go/pkg/mod"; key="go"
+            fi
+          fi
+          if [ -n "$key" ]; then
+            lock=$(ls -1 pnpm-lock.yaml yarn.lock package-lock.json build.gradle.kts build.gradle pom.xml Cargo.toml requirements.txt pyproject.toml go.mod 2>/dev/null | head -n 1)
+            hash=$(git hash-object "$lock" 2>/dev/null | cut -c1-16 || echo none)
+            {
+              echo "path<<__CACHE_PATHS__"
+              printf '%s\n' "$paths"
+              echo "__CACHE_PATHS__"
+            } >> "$GITHUB_OUTPUT"
+            echo "key=${key}-${hash}" >> "$GITHUB_OUTPUT"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency cache: $key ($lock @ $hash)"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Dependency cache: disabled"
+          fi
+
+      - name: Restore cache
+        if: ${{ steps.cache.outputs.enabled == 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.cache.outputs.path }}
+          key: br-${{ runner.os }}-${{ steps.cache.outputs.key }}
+          restore-keys: br-${{ runner.os }}-
+
+      # ---------------------------------------------------------------- execute --
+      - name: Environment
+        shell: bash
+        run: |
+          echo "::group::build-runner environment"
+          echo "runner : $RUNNER_OS / $RUNNER_ARCH"
+          echo "workdir: $(pwd)"
+          uname -a 2>/dev/null || true
+          for c in node npm pnpm yarn python python3 pip java javac gradle mvn docker dotnet go rustc cargo gcc g++ make cmake; do
+            if command -v "$c" >/dev/null 2>&1; then
+              v=$("$c" --version 2>&1 | head -n 1)
+              printf '%-8s %s\n' "$c" "$v"
+            fi
+          done
+          echo "::endgroup::"
+
+      # Same wrapper shape as "Run command", minus the exit-code plumbing: a
+      # failing setup should fail the job, which is exactly what `set -e` gives.
+      - name: Setup commands
+        if: ${{ inputs.setup != '' }}
+        shell: bash
+        env:
+          IN_SETUP: ${{ inputs.setup }}
+          IN_SHELL: ${{ inputs.shell }}
+        run: |
+          set -euo pipefail
+          case "${IN_SHELL:-bash}" in
+            pwsh|powershell) ext=ps1 ;;
+            python)          ext=py  ;;
+            *)               ext=sh  ;;
+          esac
+          printf '%s\n' "$IN_SETUP" > "/tmp/br-setup.$ext"
+          echo "--- setup ($IN_SHELL) ---"
+          head -n 60 "/tmp/br-setup.$ext"
+          echo "-------------------------"
+          case "${IN_SHELL:-bash}" in
+            pwsh|powershell) pwsh -NoProfile -File "/tmp/br-setup.ps1" ;;
+            python)          python3 "/tmp/br-setup.py" 2>/dev/null || python "/tmp/br-setup.py" ;;
+            *)               bash "/tmp/br-setup.sh" ;;
+          esac
+
+      # The wrapper is always bash (present on every hosted runner, including
+      # Windows via Git Bash). It materializes the user command from an env var
+      # — never by interpolating it into YAML — then hands it to the requested
+      # interpreter, so quoting and heredocs inside the command stay intact.
+      - name: Run command
+        id: run
+        shell: bash
+        timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+        env:
+          IN_COMMAND: ${{ inputs.command }}
+          IN_SHELL: ${{ inputs.shell }}
+        run: |
+          set -uo pipefail
+          case "${IN_SHELL:-bash}" in
+            pwsh|powershell) ext=ps1 ;;
+            python)          ext=py  ;;
+            *)               ext=sh  ;;
+          esac
+          printf '%s\n' "$IN_COMMAND" > "/tmp/br-run.$ext"
+          echo "--- build-runner echo of the command ---"
+          head -n 60 "/tmp/br-run.$ext"
+          echo "--- BUILD-RUNNER-OUTPUT-BEGIN ---"
+
+          started=$SECONDS
+          set +e
+          case "${IN_SHELL:-bash}" in
+            pwsh|powershell) pwsh -NoProfile -File "/tmp/br-run.ps1" ;;
+            python)          python3 "/tmp/br-run.py" 2>/dev/null || python "/tmp/br-run.py" ;;
+            *)               bash "/tmp/br-run.sh" ;;
+          esac
+          rc=$?
+          set -e
+          elapsed=$((SECONDS - started))
+
+          echo ""
+          echo "--- BUILD-RUNNER-OUTPUT-END ---"
+          echo "BUILD-RUNNER-EXIT-CODE=$rc"
+          echo "BUILD-RUNNER-DURATION-SECONDS=$elapsed"
+          echo "BUILD-RUNNER-SHELL=$IN_SHELL"
+          if [ "$rc" -ne 0 ]; then
+            echo "build-runner: command failed with exit code $rc" >&2
+          fi
+          exit "$rc"
+
+      # -------------------------------------------------------------- artifacts --
+      - name: Upload artifacts
+        if: ${{ always() && inputs.artifact_paths != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-runner-artifacts
+          path: ${{ inputs.artifact_paths }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      # Always runs, so a caller can tell "the command failed" apart from
+      # "the job died before the command ever started".
+      - name: Report
+        if: always()
+        shell: bash
+        env:
+          TARGET_REPO: ${{ steps.t.outputs.repo }}
+          TARGET_REF: ${{ steps.t.outputs.ref }}
+          TARGET_SHA: ${{ steps.rev.outputs.short }}
+          CMD_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          echo "================ BUILD-RUNNER-REPORT-V1 ================"
+          echo "repo=$TARGET_REPO"
+          echo "ref=$TARGET_REF"
+          echo "sha=$TARGET_SHA"
+          echo "command_outcome=$CMD_OUTCOME"
+          echo "job_status=${{ job.status }}"
+          echo "========================================================"
