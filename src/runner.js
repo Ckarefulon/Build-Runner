@@ -123,7 +123,10 @@ export async function runCommand(client, options) {
     setup = '',
     timeoutMinutes = 30,
     artifactPaths = '',
-    fetchDepth = 1,
+    // Leave undefined on purpose: "not specified" has to stay distinguishable
+    // from "explicitly 1", because snapshot mode needs full history unless the
+    // caller says otherwise.
+    fetchDepth,
     cache = 'auto',
     wait = false,
     runnerRepo = process.env.BUILD_RUNNER_REPO ?? RUNNER_REPO_FALLBACK,
@@ -185,11 +188,12 @@ export async function runCommand(client, options) {
     setup,
     // A workspace snapshot must keep REAL history: `git describe`,
     // `git rev-list --count` and version codes derived from commit counts all
-    // read it, and a shallow clone silently answers "1". That would make the
-    // snapshot build disagree with the real build on exactly the projects that
-    // care about version numbers, so snapshot mode defaults to full history.
-    // A plain head build stays shallow to keep it fast.
-    fetch_depth: workspace ? String(fetchDepth === undefined ? 0 : fetchDepth) : String(fetchDepth),
+    // read it, and a shallow clone silently answers "1". Snapshot mode therefore
+    // defaults to the full history (0 = unlimited) unless the caller overrides.
+    // A plain head build stays shallow to keep dispatch fast.
+    fetch_depth: String(
+      fetchDepth !== undefined ? fetchDepth : workspace ? 0 : 1
+    ),
     cache,
     artifact_paths: Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? ''),
   }
