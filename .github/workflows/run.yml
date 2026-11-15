@@ -115,12 +115,14 @@ jobs:
         id: rev
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
+          set +o pipefail
           sha=$(git rev-parse HEAD)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "Checked out $sha ($(git log -1 --pretty=%s))"
           git log -1 --pretty='author: %an <%ae>%ndate:   %ad'
+          exit 0
 
       # ------------------------------------------------------------------ cache --
       # Auto-detect the package manager and reuse its store across runs. Without
@@ -132,7 +134,8 @@ jobs:
         env:
           IN_CACHE: ${{ inputs.cache }}
         run: |
-          set -uo pipefail
+          set +e
+          set +o pipefail
           paths=""
           key=""
           if [ "${IN_CACHE:-auto}" != "none" ]; then
@@ -153,7 +156,8 @@ jobs:
           fi
           if [ -n "$key" ]; then
             lock=$(ls -1 pnpm-lock.yaml yarn.lock package-lock.json build.gradle.kts build.gradle pom.xml Cargo.toml requirements.txt pyproject.toml go.mod 2>/dev/null | head -n 1)
-            hash=$(git hash-object "$lock" 2>/dev/null | cut -c1-16 || echo none)
+            hash=$(git hash-object "$lock" 2>/dev/null | cut -c1-16)
+            [ -n "$hash" ] || hash=none
             {
               echo "path<<__CACHE_PATHS__"
               printf '%s\n' "$paths"
@@ -166,6 +170,7 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "Dependency cache: disabled"
           fi
+          exit 0
 
       - name: Restore cache
         if: ${{ steps.cache.outputs.enabled == 'true' }}
@@ -176,20 +181,27 @@ jobs:
           restore-keys: br-${{ runner.os }}-
 
       # ---------------------------------------------------------------- execute --
+      # Probing the toolchain must never fail the job: GitHub runs bash steps
+      # with `-e -o pipefail`, and a probe like `tool --version | head -1` exits
+      # non-zero (or dies of SIGPIPE) whenever the tool is absent or writes to
+      # stderr. Both `set +e` and `+o pipefail` are required.
       - name: Environment
         shell: bash
         run: |
+          set +e
+          set +o pipefail
           echo "::group::build-runner environment"
           echo "runner : $RUNNER_OS / $RUNNER_ARCH"
           echo "workdir: $(pwd)"
-          uname -a 2>/dev/null || true
+          uname -a 2>/dev/null
           for c in node npm pnpm yarn python python3 pip java javac gradle mvn docker dotnet go rustc cargo gcc g++ make cmake; do
             if command -v "$c" >/dev/null 2>&1; then
-              v=$("$c" --version 2>&1 | head -n 1)
+              v=$("$c" --version 2>&1 </dev/null | head -n 1)
               printf '%-8s %s\n' "$c" "$v"
             fi
           done
           echo "::endgroup::"
+          exit 0
 
       # Same wrapper shape as "Run command", minus the exit-code plumbing: a
       # failing setup should fail the job, which is exactly what `set -e` gives.
