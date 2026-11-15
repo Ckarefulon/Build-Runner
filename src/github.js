@@ -199,6 +199,89 @@ export function createClient({ token, baseUrl = API } = {}) {
       return { created: true, sha: base.object.sha }
     },
 
+    // ---------------------------------------------------------------------
+    // Git data API. This is what makes publishing a working tree cheap: a tree
+    // is built with `base_tree` pointing at an EXISTING tree object, so only
+    // the entries that actually changed are uploaded. GitHub stitches the rest
+    // in server-side, without the client ever seeing those files.
+    // ---------------------------------------------------------------------
+
+    getRef: (owner, repo, ref) =>
+      request('GET', `/repos/${owner}/${repo}/git/ref/${ref.replace(/^\/+/, '')}`),
+
+    /** null when the ref does not exist (the normal case on first use). */
+    async tryGetRef(owner, repo, ref) {
+      try {
+        return await request('GET', `/repos/${owner}/${repo}/git/ref/${ref.replace(/^\/+/, '')}`)
+      } catch (error) {
+        if (error instanceof GitHubError && error.status === 404) return null
+        throw error
+      }
+    },
+
+    getCommit: (owner, repo, sha) => request('GET', `/repos/${owner}/${repo}/git/commits/${sha}`),
+
+    getTree: (owner, repo, sha, { recursive = false } = {}) =>
+      request(
+        'GET',
+        `/repos/${owner}/${repo}/git/trees/${sha}${recursive ? '?recursive=1' : ''}`
+      ),
+
+    /**
+     * Upload one blob. Skipped entirely for unchanged paths, which is why a
+     * three-file edit costs three calls regardless of repository size.
+     */
+    createBlob: (owner, repo, content) =>
+      request('POST', `/repos/${owner}/${repo}/git/blobs`, {
+        body: { content: Buffer.from(content).toString('base64'), encoding: 'base64' },
+      }),
+
+    /**
+     * Build a tree from `baseTree` plus the given entries.
+     * An entry with `sha: null` deletes that path from the base tree.
+     */
+    createTree: (owner, repo, { baseTree, tree }) =>
+      request('POST', `/repos/${owner}/${repo}/git/trees`, {
+        body: {
+          ...(baseTree ? { base_tree: baseTree } : {}),
+          tree,
+        },
+      }),
+
+    createCommit: (owner, repo, { message, tree, parents, author }) =>
+      request('POST', `/repos/${owner}/${repo}/git/commits`, {
+        body: {
+          message,
+          tree,
+          parents: parents ?? [],
+          ...(author
+            ? { author, committer: author }
+            : {}),
+        },
+      }),
+
+    /** Create a ref, or move an existing one. Force is required to move. */
+    async upsertRef(owner, repo, ref, sha, { force = true } = {}) {
+      const target = ref.replace(/^\/+/, '')
+      let existing = null
+      try {
+        existing = await request('GET', `/repos/${owner}/${repo}/git/ref/${target}`)
+      } catch (error) {
+        if (!(error instanceof GitHubError) || error.status !== 404) throw error
+      }
+      if (existing) {
+        return request('PATCH', `/repos/${owner}/${repo}/git/refs/${target}`, {
+          body: { sha, force },
+        })
+      }
+      return request('POST', `/repos/${owner}/${repo}/git/refs`, {
+        body: { ref: `refs/heads/${target}`, sha },
+      })
+    },
+
+    deleteRef: (owner, repo, ref) =>
+      request('DELETE', `/repos/${owner}/${repo}/git/refs/${ref.replace(/^\/+/, '')}`),
+
     /**
      * Delete every file under a branch directory prefix. Used to reset the
      * workspace branch so a later run cannot see stale files from an earlier
