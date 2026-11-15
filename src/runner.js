@@ -377,10 +377,14 @@ export async function diagnose({ runnerRepo, runnerRef = 'main' } = {}) {
     return report
   }
 
-  if (repoInfo?.size === 0) {
-    push('has-commit', false, '构建器仓库还是空的：先把代码推上去')
-  } else {
-    push('has-commit', true, `仓库大小 ${repoInfo.size} KiB`)
+  // `size` in the repo payload is an asynchronously refreshed object count, so
+  // it reads 0 for a while after the first push. Ask for the actual HEAD
+  // commit instead of trusting it.
+  try {
+    const head = await client.request('GET', `/repos/${engine.owner}/${engine.repo}/commits/${runnerRef}`)
+    push('has-commit', true, `HEAD = ${String(head.sha).slice(0, 7)} ${head.commit?.message?.split('\n')[0] ?? ''}`)
+  } catch (error) {
+    push('has-commit', false, `拿不到 ${runnerRef} 上的提交：${error.message}`)
   }
 
   try {
