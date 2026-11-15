@@ -1,0 +1,30 @@
+{
+  "name": "build-runner-mcp",
+  "version": "1.0.0",
+  "description": "把 GitHub Actions 当作云端构建机：AI 指定仓库+分支+命令，远端执行并原样取回 stdout/stderr 与退出码。Build-Runner MCP server.",
+  "type": "module",
+  "bin": {
+    "build-runner-mcp": "src/server.js"
+  },
+  "main": "src/server.js",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node --use-system-ca src/server.js",
+    "test": "node --use-system-ca --test test/*.test.js"
+  },
+  "keywords": [
+    "mcp",
+    "github-actions",
+    "remote-build",
+    "ci",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "private": false
+}
