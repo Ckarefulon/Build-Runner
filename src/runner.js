@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto'
 import { createClient, GitHubError, parseSlug } from './github.js'
 import { parseJobLog, clip, summarizeFailure } from './logs.js'
+import { publishWorkspace, buildBranchName } from './snapshot.js'
 
 export const RUNNER_REPO_FALLBACK = 'Ckarefulon/Build-Runner'
 export const WORKFLOW_FILE = 'run.yml'
@@ -130,6 +131,10 @@ export async function runCommand(client, options) {
     maxWaitMs = 30 * 60 * 1000,
     maxOutputChars,
     verifyBranch = true,
+    // Workspace mode: build the local working tree instead of a pushed ref.
+    workspaceDir,
+    workspaceMode = 'head',
+    workspaceBranch,
   } = options
 
   if (typeof command !== 'string' || command.trim() === '') {
@@ -144,7 +149,26 @@ export async function runCommand(client, options) {
     runnerRef,
   })
 
-  if (verifyBranch && target.ref !== 'HEAD') {
+  let workspace = null
+  let effectiveRef = target.ref
+
+  if (workspaceDir) {
+    // Publish the local tree onto a permanent branch of the TARGET repo. Git
+    // objects are per-repository, so `base_tree` can only reference a tree that
+    // already lives where the new commit goes — a dedicated branch in the
+    // target repository is the only place that works.
+    if (verifyBranch && target.ref !== 'HEAD') {
+      await verifyRef(context, { owner: target.owner, repo: target.repo, ref: target.ref })
+    }
+    workspace = await publishWorkspace(context, {
+      dir: workspaceDir,
+      repo: target.slug,
+      baseRef: target.ref === 'HEAD' ? 'HEAD' : target.ref,
+      branch: workspaceBranch ?? buildBranchName(),
+      message: `build-runner: workspace snapshot for ${new Date().toISOString()}`,
+    })
+    effectiveRef = workspace.ref
+  } else if (verifyBranch && target.ref !== 'HEAD') {
     await verifyRef(context, { owner: target.owner, repo: target.repo, ref: target.ref })
   }
 
@@ -153,15 +177,17 @@ export async function runCommand(client, options) {
   const inputs = {
     tag,
     repo: target.slug,
-    ref: target.ref,
+    ref: effectiveRef,
     command,
     shell: normalizedShell,
     runner,
     timeout_minutes: String(timeoutMinutes),
     setup,
+    // A workspace snapshot commit must keep history so parent-derived version
+    // numbers still work; a plain head build can stay shallow and fast.
+    fetch_depth: String(workspace ? Math.max(Number(fetchDepth) || 0, workspace ? 2 : 1) : fetchDepth),
     cache,
     artifact_paths: Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? ''),
-    fetch_depth: String(fetchDepth),
   }
 
   await context.dispatch(engine.owner, engine.repo, WORKFLOW_FILE, {
@@ -172,12 +198,25 @@ export async function runCommand(client, options) {
   const receipt = {
     tag,
     repo: target.slug,
-    ref: target.ref,
+    ref: effectiveRef,
     shell: normalizedShell,
     runner,
     command,
     dispatchedAt: new Date(createdAt).toISOString(),
     workflow: `https://github.com/${engine.slug}/actions/workflows/${WORKFLOW_FILE}`,
+    ...(workspace
+      ? {
+          workspace: {
+            mode: workspaceMode,
+            branch: workspace.branch,
+            changed: workspace.changed,
+            summary: workspace.summary,
+            baseSha: workspace.baseSha,
+            sha: workspace.sha,
+            uploadedBytes: workspace.uploadedBytes ?? 0,
+          },
+        }
+      : {}),
   }
 
   const run = await locateRun(context, engine, tag, { expectCreatedAfter: createdAt })
@@ -190,12 +229,13 @@ export async function runCommand(client, options) {
     return { ...receipt, waited: false }
   }
 
-  return await waitForRun(context, engine, run.id, {
+  const result = await waitForRun(context, engine, run.id, {
     maxWaitMs,
     tag,
     receipt,
     maxOutputChars,
   })
+  return { ...receipt, ...result }
 }
 
 /** Poll a run to completion, then collect its output. */
@@ -310,6 +350,9 @@ export async function collectResult(client, engine, run, options = {}) {
     outputLines: parsed.lines ?? 0,
     failureHints: succeeded ? null : summarizeFailure(parsed.output),
     artifacts,
+    // Outranks a plain head build: the caller must know the run used a snapshot
+    // of uncommitted local changes, not a pushed commit.
+    mode: receipt.workspace ? 'snapshot' : 'head',
     ...(logNote ? { logNote } : {}),
   }
 }
