@@ -55,6 +55,68 @@ BUILD_RUNNER_TOKEN=$(gh auth token) node --use-system-ca tools/register-dsh.mjs
 | `status` | 查询某次运行；已完成则直接返回完整结果 |
 | `cancel` | 取消运行，停止消耗 Actions 时间 |
 | `doctor` | 自检 token / 仓库 / workflow / Actions 是否正常 |
+| `prepare_workspace` | 把本地未提交改动发布到构建分支（`dryRun` 可先看会传什么） |
+| `workspace_status` | 看构建分支当前指向哪个 commit |
+| `workspace_reset` | 把构建分支重置回基准分支，清历史 |
+
+## 快照模式：不提交也能云端构建
+
+给 `run` 传 `workspaceDir` 即可：**本地改完不用 commit、不用 push**，云端直接构建。
+
+```jsonc
+{
+  "repo": "owner/name",
+  "ref": "main",                    // 本地改动基于哪个分支
+  "workspaceDir": "C:/path/to/repo", // 本地 git 工作区
+  "command": "gradle assembleDebug"
+}
+```
+
+### 为什么它不慢
+
+关键点是：**内容本来就在 GitHub 上，不需要从本地重传一遍。**
+
+```
+本地 git status  →  只有 3 个文件变了
+      ↓  只上传这 3 个 blob
+GitHub 用 base_tree 把其余 4000 个文件在服务端拼进来
+      ↓
+在目标仓库的 build-runner 分支上生成 commit（parent = 真实基准 commit）
+      ↓
+云端 checkout 这个分支 → 构建
+```
+
+所以仓库有 5000 个文件、改了 3 个，就只传 3 个文件的字节。
+实测：19 处改动 → 119 KiB，而不是整个仓库。
+
+### 为什么它可信
+
+新 commit 的 **parent 是真实的基准 commit**，不是凭空造的孤立提交。
+所以 `git describe`、`git rev-list --count`、由提交数推导 versionCode 的项目，
+行为与真提交后**完全一致**。用 tar 包上传做不到这一点。
+
+实测输出（`tools/snapshot-proof.mjs`）：
+
+```
+--- parent linkage ---
+a2950a2  ← 快照 commit
+84ff97e  ← 父提交，就是 main 的 HEAD
+--- log ---
+a2950a2 build-runner: workspace snapshot
+84ff97e build-runner: publish: src/runner.js
+6228515 build-runner: publish: tools/_proof.mjs
+```
+
+### 边界
+
+- **只有 git 能看见的文件会被上传**。`.gitignore` 排除的内容（`node_modules/`、
+  构建产物、`.env`）永远不会离开本机 —— 这是刻意的防泄漏设计。
+- **改动的文件在目标仓库里会以 `build-runner` 分支长期存在**。它不碰你的日常分支，
+  但会在仓库里多出一个分支。用 `workspace_reset` 可以随时清回基准。
+- **结果带 `mode: snapshot` 标记**。它是「预检」，不等同于已推送代码的构建 ——
+  这个区别对 AI 判断该不该相信结论很重要。
+- 快照模式默认拉**完整历史**（`fetch_depth: 0`），比普通模式慢几秒，换来版本号正确。
+
 
 ### `run` 的关键参数
 
