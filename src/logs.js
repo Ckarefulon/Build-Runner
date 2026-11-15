@@ -28,6 +28,24 @@ function stripTimestamps(line) {
   return out
 }
 
+// GitHub colors step output; the escape codes are noise in a tool result.
+const ANSI = /\u001B\[[0-9;]*[A-Za-z]/g
+// The runner interleaves its own "File sync" bookkeeping lines into a step's
+// stdout on some images; they are never part of the command's output.
+const SYNC_LINE = /^##\[(group|endgroup|debug|warning|error|command|section)\]/
+
+function stripSyncLines(lines) {
+  const out = []
+  for (const line of lines) {
+    if (SYNC_LINE.test(line.trim())) continue
+    out.push(line.replace(ANSI, ''))
+  }
+  // Trim the blank lines the wrapper itself emits around the section markers.
+  while (out.length > 0 && out[0].trim() === '') out.shift()
+  while (out.length > 0 && out[out.length - 1].trim() === '') out.pop()
+  return out
+}
+
 /**
  * @param {Buffer|string} raw complete job log
  * @returns {{output:string, exitCode:number|null, durationSeconds:number|null,
@@ -39,11 +57,32 @@ export function parseJobLog(raw) {
   const rawLines = text.split('\n')
   const lines = rawLines.map(stripTimestamps)
 
-  const beginAt = lines.findIndex(line => line.includes(MARKERS.begin))
-  const endAt = lines.findIndex((line, index) => index > beginAt && line.includes(MARKERS.end))
-  const hasSection = beginAt !== -1 && endAt !== -1
+  // GitHub echoes every step's own script into the log before running it, so a
+  // line reading `echo "--- BUILD-RUNNER-OUTPUT-BEGIN ---"` appears BEFORE the
+  // real marker that the executed shell prints. Taking the first match captures
+  // the echoed script; the genuine stream is the LAST begin marker that still
+  // has an end marker after it.
+  const beginCandidates = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].includes(MARKERS.begin)) beginCandidates.push(i)
+  }
 
-  const output = hasSection ? lines.slice(beginAt + 1, endAt).join('\n') : ''
+  let beginAt = -1
+  let endAt = -1
+  for (let i = beginCandidates.length - 1; i >= 0; i -= 1) {
+    const candidate = beginCandidates[i]
+    const endIndex = lines.findIndex(
+      (line, index) => index > candidate && line.includes(MARKERS.end)
+    )
+    if (endIndex !== -1) {
+      beginAt = candidate
+      endAt = endIndex
+      break
+    }
+  }
+
+  const hasSection = beginAt !== -1 && endAt !== -1
+  const output = hasSection ? stripSyncLines(lines.slice(beginAt + 1, endAt)).join('\n') : ''
 
   const joined = lines.join('\n')
   const exitMatch = joined.match(MARKERS.exitCode)
