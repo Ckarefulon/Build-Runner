@@ -183,9 +183,13 @@ export async function runCommand(client, options) {
     runner,
     timeout_minutes: String(timeoutMinutes),
     setup,
-    // A workspace snapshot commit must keep history so parent-derived version
-    // numbers still work; a plain head build can stay shallow and fast.
-    fetch_depth: String(workspace ? Math.max(Number(fetchDepth) || 0, workspace ? 2 : 1) : fetchDepth),
+    // A workspace snapshot must keep REAL history: `git describe`,
+    // `git rev-list --count` and version codes derived from commit counts all
+    // read it, and a shallow clone silently answers "1". That would make the
+    // snapshot build disagree with the real build on exactly the projects that
+    // care about version numbers, so snapshot mode defaults to full history.
+    // A plain head build stays shallow to keep it fast.
+    fetch_depth: workspace ? String(fetchDepth === undefined ? 0 : fetchDepth) : String(fetchDepth),
     cache,
     artifact_paths: Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? ''),
   }
