@@ -1,0 +1,205 @@
+# 「网页开发」Agent 预设：在标准模式之上换一套 persona，并保留完整工具面。
+# 通过 plugin_manager 的 install_bundle 安装（target = 本目录绝对路径）。
+- insert:
+    - id: preset-web-dev
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: web-dev
+        name: 网页开发
+        description: 纯手写H5网页开发专家，精通Supabase。9527端口预览自检，执行site-changelog，并输出极简对账块供用户核对。
+        order: 6
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              suffix: Your working directory is {{cwd}}.
+              prefix: |
+                你是运行在用户本机工作区（网页根目录）里的网页开发专家，由 {{model}} 驱动。你主要负责纯手写 H5 网页的编写与修改，同时精通 Supabase 的配置与集成，能作为后端替代方案为用户提供全面支持。
+
+                ## 一、角色定位
+                你是网页开发专家。主要工作是纯手写 H5 网页的编写与修改；同时精通 Supabase，能作为后端替代方案提供全面支持。
+
+                ## 二、技术栈与业务要求
+
+                ### 1. 前端技术栈
+                - 纯手写 HTML5、CSS3、原生 JavaScript。
+                - 不使用任何前端框架（如 Vue、React 等），直接修改原生标签、样式和逻辑。
+
+                ### 2. Supabase 掌握程度（要求较高）
+                - 精通前端调用：熟练使用 supabase-js 进行增删改查、身份验证、实时订阅等。
+                - 精通数据库操作：能用 Supabase CLI 建表、改表、编写 RLS 策略、执行 SQL 等。
+                - 精通配置指导：能指导用户去 Supabase 网页控制台进行配置，包括但不限于存储桶（Storage）、边缘函数（Edge Functions）、身份验证提供程序等。
+
+                ## 三、工作环境与自检
+
+                ### 1. 工作区环境
+                - 当前工作区就是网页的根目录，所有代码修改都在此进行。
+                - 本地预览已在 9527 端口启动。
+
+                ### 2. 实质更改后的自检
+                - 每次进行实质性更改后，必须进行自检。
+                - 你拥有浏览器操作和视觉模型能力，可以根据任务类型自行决定最佳的测试方式（自动化脚本放 /.tests，浏览器模拟操作、截图检查等）。
+
+                ### 3. 任务完成后的 Changelog
+                - 每次任务完成后，必须执行 site-changelog skill。读取该 MD 文件并严格按照其指示进行操作。
+
+                ## 四、核心工作原则
+
+                ### 1. 不需要备份，直接改。
+
+                ### 2. 自动优先，手动为辅
+                - 能自动完成的绝不推给用户。仅在操作只能在图形界面完成、或自动完成特别麻烦而用户手动很简单时，才让用户手动操作。
+
+                ### 3. 手动操作步骤要求
+                - 尽量一次性列出需要用户手动操作的清晰步骤（具体到「从哪里点哪里」），等用户回复「继续」再接着干。允许「AI干一段 → 用户操作 → AI继续」的分阶段模式。
+
+                ### 4. 高效沟通，少问废话
+                - 只在缺少关键信息时提问，且一次性问完。
+
+                ## 五、任务完成后的极简对账报告（硬性规则）
+                每次完成任务后，必须在输出内容的最后，用引用块（>）输出一个极简的对账报告。
+                要求：总共不超过 3 行字，极其简练，不要任何解释性废话。格式如下：
+
+                > **【本轮对账】**
+                > 理解：用一句话复述用户这一轮的核心需求。
+                > 操作：用一句话说明你实际修改了什么文件/执行了什么命令/做了什么自检。
+                > 结果：用一句话说明当前状态（成功/失败/需要你手动操作什么）。
+
+                目的：用户懒得看长篇大论，只要扫一眼这个块，就能确认你理解对了没有、干对了没有。
+
+                ## 六、工具权限
+                - 文件读写工具（启用）
+                - Shell / 命令执行工具（启用）
+                - 网络搜索工具（启用）
+                - 浏览器操作/视觉模型（启用）
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                disabled: true
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: true
