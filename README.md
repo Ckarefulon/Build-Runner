@@ -58,6 +58,45 @@ BUILD_RUNNER_TOKEN=$(gh auth token) node --use-system-ca tools/register-dsh.mjs
 | `prepare_workspace` | 把本地未提交改动发布到构建分支（`dryRun` 可先看会传什么） |
 | `workspace_status` | 看构建分支当前指向哪个 commit |
 | `workspace_reset` | 把构建分支重置回基准分支，清历史 |
+| `release` | **出包**：构建 → 打包 → 提交到目标仓库根目录 → 发 GitHub Release |
+
+## 出包（release）
+
+一条命令完成「构建 + 打包 + 存档 + 发版」：
+
+```jsonc
+{
+  "repo": "owner/name",
+  "ref": "main",
+  "command": "gradle assembleDebug",          // 留空则直接打包已有文件
+  "artifactPaths": "app/build/outputs/apk/**", // 必填
+  "packageName": "app-debug",
+  "releaseTag": "app-debug-v1.2",             // 默认同包名
+  "commitBranch": "builds"                     // 产物落到这个分支的根目录
+}
+```
+
+它做三件事：
+
+1. **云端构建并打包**（zip；没有 zip 命令时退化为 tar.gz），算出 SHA256
+2. **把包提交到目标仓库根目录**的 `builds` 分支
+3. **在构建器仓库发 GitHub Release**，把包作为资产附上
+
+### 为什么打包也在云端
+
+产物已经在 runner 上了。先下载回本机再上传，等于把这份字节来回搬两次——
+这正是这个工具要避免的，而且大于内存的包会直接失败。
+
+### 几个刻意的取舍
+
+- **包提交到独立的 `builds` 分支，不是你的工作分支。** 直接推工作分支会污染没人
+  要求修改的分支，遇到分支保护还会直接失败。
+- **构建失败就不会有包。** 打包步骤是 `if: success()`，实测 `exit 7` 时既不出包
+  也不发 Release —— 避免把半成品当成品发出去。
+- **同一个 tag 重发不会报错**：已有 Release 就覆盖资产（`--clobber`），方便重跑。
+- **`artifactPaths` 匹配不到任何文件会直接失败**，而不是发一个空包。
+- 想要「只发 Release、不提交到仓库」，传 `commitToRepo: false`。
+
 
 ## 快照模式：不提交也能云端构建
 
@@ -173,10 +212,14 @@ BUILD_RUNNER_TOKEN=$(gh auth token) node --use-system-ca tools/mcp-client.mjs ru
 
 ```
 .github/workflows/run.yml   # 中央引擎：checkout 目标仓库并执行命令
-src/github.js               # GitHub REST 客户端
+.github/workflows/release.yml # 出包：构建 → 打包 → 提交根目录 → 发 Release
+src/github.js               # GitHub REST 客户端（含 Git Data / Trees API）
 src/logs.js                 # 日志解析（剥离回显脚本/时间戳/ANSI）
 src/runner.js               # 派发、定位运行、轮询、收集结果
+src/snapshot.js             # 快照：base_tree 增量提交，快照模式
+src/workspace.js            # 本地 diff 采集（git status -z）
+src/release.js              # 出包编排与结果解析
 src/server.js               # MCP stdio 服务器（零依赖手写 JSON-RPC）
-tools/                      # publish / smoke / cross-repo / mcp-client / register-dsh
-test/logs.test.js           # 解析器回归测试
+tools/                      # publish / smoke / cross-repo / mcp-client / register-dsh / snapshot-proof
+test/                       # 解析器与 diff 采集回归测试
 ```
