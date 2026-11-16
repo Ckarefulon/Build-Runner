@@ -62,22 +62,9 @@ on:
         description: 'git fetch depth (0 = full history)'
         required: false
         default: '1'
-      release_tag:
-        description: 'Tag to create a release under (in THIS repo). Empty = no release.'
-        required: false
-        default: ''
-      release_files:
-        description: 'Newline or comma separated files to attach to that release.'
-        required: false
-        default: ''
-      release_name:
-        description: 'Release title. Empty = use the tag.'
-        required: false
-        default: ''
 
 permissions:
-  # 写权限：Publish release 步骤要建 Release、传资产；upload-artifact 也需要它才能落地
-  contents: write
+  contents: read
 
 env:
   PYTHONUNBUFFERED: '1'
@@ -321,81 +308,13 @@ jobs:
 
       # -------------------------------------------------------------- artifacts --
       - name: Upload artifacts
-        # release: 语法是给 Publish release 用的，不是文件路径，跳过这条上传
-        if: ${{ always() && inputs.artifact_paths != '' && !startsWith(inputs.artifact_paths, 'release:') }}
+        if: ${{ always() && inputs.artifact_paths != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: build-runner-artifacts
           path: ${{ inputs.artifact_paths }}
           if-no-files-found: warn
           retention-days: 7
-
-      # ---------------------------------------------------------------- release --
-      # 把产物挂到本仓库的 Release 上：artifact 会过期（7 天）而且这里 upload-artifact
-      # 受 permissions: contents: read 影响，装不了也拿不到；Release 资产是长期可下载的。
-      # token 用 checkout_token（权限够写本仓库），所以必须作为独立步骤、由 workflow 注入，
-      # 不能靠命令自己读环境变量。
-      - name: Publish release
-        # 触发方式有两种，任选其一：
-        #   1) release_tag + release_files（工具支持这两个 input 时，最直观）；
-        #   2) 把发布意图写进 artifact_paths：release:<tag>@<file>[,<file>...]
-        #      —— artifact_paths 是现有工具一定会透传的参数，所以这条现在就能用。
-        if: ${{ always() && (inputs.release_tag != '' || startsWith(inputs.artifact_paths, 'release:')) }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.checkout_token || github.token }}
-          IN_TAG: ${{ inputs.release_tag }}
-          IN_FILES: ${{ inputs.release_files }}
-          IN_PATHS: ${{ inputs.artifact_paths }}
-          IN_NAME: ${{ inputs.release_name }}
-          THIS_REPO: ${{ github.repository }}
-        run: |
-          set -uo pipefail
-          if ! command -v gh >/dev/null 2>&1; then
-            echo "::error::gh 不可用，无法发布 release"
-            exit 1
-          fi
-          tag="$IN_TAG"
-          filesSpec="$IN_FILES"
-          # artifact_paths 里的 release:<tag>@<file,file> 约定
-          case "${IN_PATHS}" in
-            release:*)
-              spec="${IN_PATHS#release:}"
-              [ -z "$tag" ] && tag="${spec%%@*}"
-              [ -z "$filesSpec" ] && filesSpec="${spec#*@}"
-              ;;
-          esac
-          if [ -z "$tag" ]; then
-            echo "::error::既没有 release_tag，artifact_paths 也不是 release:<tag>@<files> 形式"
-            exit 1
-          fi
-          name="${IN_NAME:-$tag}"
-          files=()
-          while IFS= read -r line; do
-            for part in ${line//,/ }; do
-              [ -n "$part" ] && files+=("$part")
-            done
-          done <<< "$filesSpec"
-          echo "release tag  : $tag"
-          echo "release name : $name"
-          echo "repo         : $THIS_REPO"
-          for f in "${files[@]}"; do
-            if [ ! -f "$f" ]; then
-              echo "::error::找不到要发布的文件：$f"
-              exit 1
-            fi
-            echo "  file: $f ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f") B)"
-          done
-          if gh release view "$tag" --repo "$THIS_REPO" >/dev/null 2>&1; then
-            echo "release 已存在，追加资产"
-          else
-            gh release create "$tag" --repo "$THIS_REPO" --title "$name" --prerelease \
-              --notes "build-runner 构建产物：$tag"
-          fi
-          gh release upload "$tag" "${files[@]}" --repo "$THIS_REPO" --clobber
-          echo "=== release 资产 ==="
-          gh release view "$tag" --repo "$THIS_REPO" --json tagName,url,assets \
-            --jq '.tagName + " " + .url, (.assets[] | "  " + .name + " " + (.size|tostring) + "B")'
 
       # Always runs, so a caller can tell "the command failed" apart from
       # "the job died before the command ever started".
