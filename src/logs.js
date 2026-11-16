@@ -16,6 +16,7 @@ export const MARKERS = {
   duration: /BUILD-RUNNER-DURATION-SECONDS=(\d+)/,
   shell: /BUILD-RUNNER-SHELL=(\S+)/,
   report: '================ BUILD-RUNNER-REPORT-V1 ================',
+  releaseReport: '================ BUILD-RUNNER-RELEASE-REPORT-V1 ================',
 }
 
 function stripTimestamps(line) {
@@ -92,10 +93,11 @@ export function parseJobLog(raw) {
   // The Report step prints `key=value` pairs; collect them so the caller can
   // prove which revision actually ran. GitHub echoes the step script first, so
   // anchor on the LAST occurrence of the report banner — the printed one.
+  // The release workflow uses a distinct banner, so try both.
   const report = {}
   let reportAt = -1
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (lines[i].includes(MARKERS.report)) {
+    if (lines[i].includes(MARKERS.releaseReport) || lines[i].includes(MARKERS.report)) {
       reportAt = i
       break
     }
