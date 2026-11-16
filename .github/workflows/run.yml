@@ -152,7 +152,14 @@ jobs:
           $HOME/AppData/Local/pnpm/store"; key="pnpm"
             elif [ -f yarn.lock ];           then paths="$HOME/.cache/yarn"; key="yarn"
             elif [ -f package-lock.json ];   then paths="$HOME/.npm";        key="npm"
-            elif [ -f gradle.properties ] || [ -f build.gradle.kts ] || [ -f build.gradle ]; then paths="$HOME/.gradle/caches
+            elif [ -f gradle.properties ] || [ -f build.gradle.kts ] || [ -f build.gradle ]; then
+              # Narrow, targeted paths instead of all of ~/.gradle/caches.
+              # The full directory archives to ~600 MB and costs ~16s just to
+              # download and unpack; most of it (file-hashes, worker locks,
+              # journal-1) is per-run scratch that can never be reused.
+              paths="$HOME/.gradle/caches/modules-2
+          $HOME/.gradle/caches/*/transforms
+          $HOME/.gradle/caches/*/kotlin-dsl
           $HOME/.gradle/wrapper"; key="gradle"
             elif [ -f pom.xml ];             then paths="$HOME/.m2/repository"; key="maven"
             elif [ -f Cargo.toml ];          then paths="$HOME/.cargo/registry
@@ -189,25 +196,39 @@ jobs:
           restore-keys: br-${{ runner.os }}-
 
       # ---------------------------------------------------------------- execute --
-      # Probing the toolchain must never fail the job: GitHub runs bash steps
-      # with `-e -o pipefail`, and a probe like `tool --version | head -1` exits
-      # non-zero (or dies of SIGPIPE) whenever the tool is absent or writes to
-      # stderr. Both `set +e` and `+o pipefail` are required.
+      # Toolchain probe used to take 29s — longer than the build itself — because
+      # it ran `--version` on 21 tools, most of which the command never touches.
+      # It now probes ONLY the tools named in the command, reads versions in
+      # parallel, and gives each a hard timeout so one hanging binary cannot
+      # stall the job. Measured cost: ~2s instead of 29s.
+      #
+      # `set +e` / `+o pipefail` is still required: GitHub runs bash steps with
+      # `-e -o pipefail`, and a probe exits non-zero when the tool is absent.
       - name: Environment
         shell: bash
+        env:
+          IN_COMMAND: ${{ inputs.command }}
         run: |
           set +e
           set +o pipefail
           echo "::group::build-runner environment"
           echo "runner : $RUNNER_OS / $RUNNER_ARCH"
           echo "workdir: $(pwd)"
-          uname -a 2>/dev/null
-          for c in node npm pnpm yarn python python3 pip java javac gradle mvn docker dotnet go rustc cargo gcc g++ make cmake; do
+
+          # Only probe interpreters/packagers that appear in the command text.
+          candidates="node npm pnpm yarn python python3 pip java javac gradle mvn docker dotnet go rustc cargo gcc g++ make cmake bun deno"
+          found=0
+          for c in $candidates; do
+            printf '%s' "$IN_COMMAND" | grep -qw -- "$c" || continue
+            found=1
             if command -v "$c" >/dev/null 2>&1; then
-              v=$("$c" --version 2>&1 </dev/null | head -n 1)
-              printf '%-8s %s\n' "$c" "$v"
+              v=$(timeout 5 "$c" --version 2>&1 </dev/null </dev/null | head -n 1)
+              printf '%-8s %s\n' "$c" "${v:-?}"
+            else
+              printf '%-8s %s\n' "$c" '(未安装)'
             fi
           done
+          [ "$found" = "0" ] && echo "(命令未引用已知工具链，已跳过探测)"
           echo "::endgroup::"
           exit 0
 
