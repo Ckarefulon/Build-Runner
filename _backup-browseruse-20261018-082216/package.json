@@ -1,0 +1,53 @@
+{
+  "name": "dsh-profile-desktop",
+  "private": true,
+  "dependencies": {
+    "@deepseek-ai/dsh-browser-use": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-experimental-browser-use-chrome-devtools-mcp": "0.2.0-rc.2",
+    "@jipika/dsh-memory": "^0.6.0",
+    "@local/dsh-computer-expert-preset": "link:C:/Users/Vxiao/Documents/deepseek-harness/default-workspace/computer-expert-preset",
+    "@local/dsh-web-dev-preset": "link:C:/Users/Vxiao/Documents/deepseek-harness/default-workspace/web-dev-preset",
+    "@mrweicodes/dsh-loop-guard": "^1.0.9",
+    "@sutong12/dsh-mcp-lazy": "^0.12.0",
+    "dsh-chrome-devtools": "git+https://github.com/DevTarlow/dsh-chrome-devtools.git",
+    "dsh-client-auto-continue": "^0.12.2",
+    "dsh-codespace-workspace": "^0.1.1",
+    "dsh-deepseek-webchat": "^0.4.8",
+    "dsh-gitbar-lite": "0.6.5",
+    "dsh-keep-awake": "^0.2.0",
+    "dsh-mcp-native": "git+https://github.com/fanyongbing/dsh-mcp-native.git",
+    "dsh-pet": "^0.3.4",
+    "dsh-providers-hub": "^1.6.261016",
+    "dsh-rewind-plugin": "^0.15.1",
+    "dsh-tailscale-remote": "^0.3.0",
+    "dsh-workbuddy-oauth": "git+https://github.com/molly-ovo/dsh-workbuddy-oauth.git",
+    "smart-compaction": "^0.3.1"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-client-auto-continue",
+        "dsh-chrome-devtools",
+        "@local/dsh-computer-expert-preset",
+        "@sutong12/dsh-mcp-lazy",
+        "dsh-mcp-native",
+        "@jipika/dsh-memory",
+        "dsh-pet",
+        "dsh-rewind-plugin",
+        "smart-compaction",
+        "@local/dsh-web-dev-preset",
+        "dsh-deepseek-webchat",
+        "dsh-codespace-workspace",
+        "dsh-keep-awake",
+        "dsh-tailscale-remote",
+        "@mrweicodes/dsh-loop-guard",
+        "dsh-gitbar-lite",
+        "dsh-providers-hub",
+        "@deepseek-ai/dsh-experimental-cot-translation-bundle",
+        "@deepseek-ai/dsh-experimental-inspector-profile"
+      ]
+    }
+  }
+}
