@@ -62,6 +62,18 @@ on:
         description: 'git fetch depth (0 = full history)'
         required: false
         default: '1'
+      release_tag:
+        description: 'Tag to create a release under (in THIS repo). Empty = no release.'
+        required: false
+        default: ''
+      release_files:
+        description: 'Newline or comma separated files to attach to that release.'
+        required: false
+        default: ''
+      release_name:
+        description: 'Release title. Empty = use the tag.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -315,6 +327,54 @@ jobs:
           path: ${{ inputs.artifact_paths }}
           if-no-files-found: warn
           retention-days: 7
+
+      # ---------------------------------------------------------------- release --
+      # 把产物挂到本仓库的 Release 上：artifact 会过期（7 天）而且这里 upload-artifact
+      # 受 permissions: contents: read 影响，装不了也拿不到；Release 资产是长期可下载的。
+      # token 用 checkout_token（权限够写本仓库），所以必须作为独立步骤、由 workflow 注入，
+      # 不能靠命令自己读环境变量。
+      - name: Publish release
+        if: ${{ always() && inputs.release_tag != '' && inputs.release_files != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.checkout_token || github.token }}
+          IN_TAG: ${{ inputs.release_tag }}
+          IN_FILES: ${{ inputs.release_files }}
+          IN_NAME: ${{ inputs.release_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "::error::gh 不可用，无法发布 release"
+            exit 1
+          fi
+          name="${IN_NAME:-$IN_TAG}"
+          files=()
+          while IFS= read -r line; do
+            for part in ${line//,/ }; do
+              [ -n "$part" ] && files+=("$part")
+            done
+          done <<< "$IN_FILES"
+          echo "release tag  : $IN_TAG"
+          echo "release name : $name"
+          echo "repo         : $THIS_REPO"
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::找不到要发布的文件：$f"
+              exit 1
+            fi
+            echo "  file: $f ($(stat -c%s "$f" 2>/dev/null || stat -f%z "$f") B)"
+          done
+          if gh release view "$IN_TAG" --repo "$THIS_REPO" >/dev/null 2>&1; then
+            echo "release 已存在，追加资产"
+          else
+            gh release create "$IN_TAG" --repo "$THIS_REPO" --title "$name" --prerelease \
+              --notes "build-runner 构建产物：$IN_TAG"
+          fi
+          gh release upload "$IN_TAG" "${files[@]}" --repo "$THIS_REPO" --clobber
+          echo "=== release 资产 ==="
+          gh release view "$IN_TAG" --repo "$THIS_REPO" --json tagName,url,assets \
+            --jq '.tagName + " " + .url, (.assets[] | "  " + .name + " " + (.size|tostring) + "B")'
 
       # Always runs, so a caller can tell "the command failed" apart from
       # "the job died before the command ever started".
