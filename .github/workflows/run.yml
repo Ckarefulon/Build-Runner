@@ -133,19 +133,33 @@ jobs:
           exit 0
 
       # ------------------------------------------------------------------ cache --
-      # Auto-detect the package manager and reuse its store across runs. Without
-      # this every remote invocation pays a cold install, which is the single
-      # biggest reason a cloud run feels nothing like a local one.
+      # Auto-detect the package manager and reuse its store across runs.
+      #
+      # Cache key scoping matters more than it looks. Every target project runs
+      # through THIS one workflow, so all of them share one cache pool owned by
+      # the engine repo. Without a repo component in the key:
+      #   * project B's exact key misses, then `restore-keys: br-Linux-` hands it
+      #     project A's Gradle cache — wrong artifacts, wasted restore time;
+      #   * everything competes for one 10 GB budget, so busy projects evict each
+      #     other and start missing on every run, which is slower than no cache.
+      # The target slug is therefore part of both the key and the restore prefix.
       - name: Detect caches
         id: cache
         shell: bash
         env:
           IN_CACHE: ${{ inputs.cache }}
+          TARGET_REPO: ${{ steps.t.outputs.repo }}
         run: |
           set +e
           set +o pipefail
           paths=""
           key=""
+          # owner/name -> owner-name. Also caps length and strips anything that
+          # is not cache-key safe, since a key may only contain [-_.A-Za-z0-9].
+          scope=$(printf '%s' "${TARGET_REPO:-this-repo}" \
+            | tr '/' '-' \
+            | tr -cd 'A-Za-z0-9._-' \
+            | cut -c1-80)
           if [ "${IN_CACHE:-auto}" != "none" ]; then
             if   [ -f pnpm-lock.yaml ];      then paths="$HOME/.local/share/pnpm/store
           $HOME/Library/pnpm/store
@@ -178,9 +192,10 @@ jobs:
               printf '%s\n' "$paths"
               echo "__CACHE_PATHS__"
             } >> "$GITHUB_OUTPUT"
-            echo "key=${key}-${hash}" >> "$GITHUB_OUTPUT"
+            echo "scope=$scope" >> "$GITHUB_OUTPUT"
+            echo "key=$key-$hash" >> "$GITHUB_OUTPUT"
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "Dependency cache: $key ($lock @ $hash)"
+            echo "Dependency cache: $key ($lock @ $hash) scoped to $scope"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "Dependency cache: disabled"
@@ -192,8 +207,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.cache.outputs.path }}
-          key: br-${{ runner.os }}-${{ steps.cache.outputs.key }}
-          restore-keys: br-${{ runner.os }}-
+          # Key includes the target repo so projects never share or evict each
+          # other's entries.
+          key: br-${{ runner.os }}-${{ steps.cache.outputs.scope }}-${{ steps.cache.outputs.key }}
+          # Restore prefix is ALSO scoped. A bare `br-Linux-` prefix would let
+          # one project restore another project's dependency cache on a miss,
+          # which is both wrong and slower than a clean download.
+          restore-keys: br-${{ runner.os }}-${{ steps.cache.outputs.scope }}-
 
       # ---------------------------------------------------------------- execute --
       # Toolchain probe used to take 29s — longer than the build itself — because
