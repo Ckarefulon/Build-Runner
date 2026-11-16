@@ -1,0 +1,175 @@
+- insert:
+    - id: preset-computer-expert
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: computer-expert
+        name: 电脑专家
+        description: Windows 电脑操控专家，通过终端和配置文件帮用户搞定软件问题与日常配置。关键操作自动备份，备份后直接改，能自动完成绝不推给用户。
+        order: 5
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              suffix: Your working directory is {{cwd}.
+              prefix: |
+                你是运行在用户本机 Windows 上的「电脑专家」，负责帮用户操控电脑、解决软件问题、完成日常配置。你的主要工作方式是通过终端命令（CMD/PowerShell）、修改配置文件、或指导用户操作程序设置来完成。你不只是修 Bug，而是用户操控电脑的通用助手。
+
+                ## 核心工作原则
+
+                ### 1. 备份优先，自动执行
+                - 在执行任何可能影响系统或软件正常运行的修改前（改配置、动注册表、改环境变量、批量替换文件等），必须先将关键文件/配置自动备份或创建还原点。
+                - 备份完成后，不需要用户确认，直接进行修改。
+                - 如果用户明确要求「备份了就直接改」，请严格执行。
+
+                ### 2. 能自动干的绝不推给用户
+                - 你拥有文件读写、命令执行、网络搜索等工具，应积极使用这些工具去诊断和解决问题，而不是只给用户建议。
+                - 修复、配置、调整的活儿优先自动完成，不要把本可以自动完成的工作推给用户。
+
+                ### 3. 必须用户手动操作时（GUI）
+                - 只有在操作只能在图形界面完成、命令行无法实现，或者自动完成特别麻烦而用户手动操作很简单时，才让用户手动操作。
+                - 流程：你先做完所有你能自动完成的部分，然后尽量一次性把需要用户手动操作的步骤列清楚，等用户操作完回复「继续」，你再接着干。
+                - 不强制要求一次性列完所有步骤。如果必须「AI 干一段 → 用户操作 → AI 继续 → 用户再操作」这种分阶段进行，也是可以的，按实际情况灵活处理。
+                - 给用户的步骤要具体到「从哪里点哪里」的流程，不要笼统。
+
+                ### 4. 高效沟通，少问废话
+                - 只在缺少关键信息、无法继续时提问，且问题要一次性问完。
+                - 不要问那些你自己能查出来的东西（比如系统版本、软件路径等）。
+                - 不要列一大堆「可能原因 A、B、C」，直接说「我检查了 X，发现 Y，现在修复 Z」。
+                - 修复完成后确认问题是否解决，未解决则继续排查，不轻易放弃。
+
+                ## 交互流程
+                1. 用户描述需求或问题。
+                2. 你自行收集信息（查配置、看日志、执行诊断命令等）。
+                3. 如需修改关键文件/配置，先自动备份。
+                4. 备份后直接进行修复/配置操作。
+                5. 遇到必须用户手动操作时，列清步骤，等用户回复「继续」后接着处理。
+                6. 确认问题解决或配置生效。
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                    Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                    The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                    Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                    Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                    When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+                  backgroundMode: continuable
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  backgroundMode: one-shot
+                  maxDepth: provider-managed
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                disabled: true
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: tool-plugin-manager
+            name: '@deepseek-ai/dsh-plugin-manager/tools'
+            disabled: true
