@@ -1,0 +1,73 @@
+diff --git a/index.js b/index.js
+index 91ecf85..e203cac 100644
+--- a/index.js
++++ b/index.js
+@@ -15,7 +15,7 @@
+  * @module dsh-compact-now
+  */
+ 
+-import { toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
++import { toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
+ import { defineTool } from '@deepseek-ai/dsh-tools'
+ import { createUserMessage } from '@deepseek-ai/dsh-llm'
+ import { summarizeContextUsage } from './context-status.js'
+@@ -54,6 +54,36 @@ const DESCRIPTION =
+   + 'Harmless to call speculatively either way — it no-ops if there is not enough history to '
+   + 'compact yet.'
+ 
++/**
++ * Whether a plain `surfaceOp: 'append'` may be issued right now.
++ *
++ * An append lands at the tail of the surface. If that tail is an assistant
++ * message whose tool call is still unanswered — exactly the situation inside a
++ * tool's own `execute()`, which is where `compact_now` runs — the appended node
++ * lands *between* that call and its `tool/result`. The model-visible surface
++ * then holds an unanswered tool call interrupted by a user message, which is
++ * not a valid wire sequence: the upstream rejects the next request with
++ * HTTP 400 `INVALID_REQUEST`, and because the surface is durable, every later
++ * turn of that session fails the same way. Only the mid-turn path can hit
++ * this; `/compact` runs on an idle agent and has no open call.
++ *
++ * The window is genuinely closed: the guard runs before `compactRegion()`,
++ * whose own checkpoint node is a `replace` op that lands at the *start* of the
++ * replaced range, never at the tail.
++ *
++ * @returns true only when the cut after the last surface node is balanced.
++ *   Fails closed — if balance cannot be established, do not append.
++ */
++function canAppendToSurface(session) {
++  const nodes = session.surface?.nodes
++  if (!Array.isArray(nodes) || nodes.length === 0) return false
++  try {
++    return toolPairingBalancedAfter(session, nodes[nodes.length - 1])
++  } catch {
++    return false
++  }
++}
++
+ /**
+  * Compact the largest safe span of `agent`'s history. Shared by the
+  * `compact_now` tool and the automatic safe-point trigger.
+@@ -70,10 +100,18 @@ async function compactAgent(compaction, agent, signal, notice) {
+   // An own `kind` + `form: 'notice'` is the same tagging
+   // dsh-compaction-basic and repeat-tool-reminder use for host-generated
+   // asides — collapsed by default, never rendered as if the user typed it.
+-  session.append('user/message', createUserMessage({
+-    content: [{ type: 'text', text: notice }],
+-    source: { ...PLUGIN_SOURCE, form: 'notice', summary: 'Compacting now' },
+-  }), { surfaceOp: 'append' })
++  //
++  // Skipped when it would interpose on an open tool call (see
++  // canAppendToSurface). Nothing is lost visually in that case: core's own
++  // `compaction/start` event is emitted by compactRegion a moment later, and
++  // the chat UI already renders it as a live "condensing" row — which is why
++  // the notice was only ever a nicety here, never the load-bearing signal.
++  if (canAppendToSurface(session)) {
++    session.append('user/message', createUserMessage({
++      content: [{ type: 'text', text: notice }],
++      source: { ...PLUGIN_SOURCE, form: 'notice', summary: 'Compacting now' },
++    }), { surfaceOp: 'append' })
++  }
+   const result = await compaction.compactRegion(range.start, range.end, agent, signal)
+   return {
+     compacted: true,
