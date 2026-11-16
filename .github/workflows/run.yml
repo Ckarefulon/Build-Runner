@@ -346,6 +346,7 @@ jobs:
           GH_TOKEN: ${{ secrets.checkout_token || github.token }}
           IN_TAG: ${{ inputs.release_tag }}
           IN_FILES: ${{ inputs.release_files }}
+          IN_PATHS: ${{ inputs.artifact_paths }}
           IN_NAME: ${{ inputs.release_name }}
           THIS_REPO: ${{ github.repository }}
         run: |
@@ -357,15 +358,13 @@ jobs:
           tag="$IN_TAG"
           filesSpec="$IN_FILES"
           # artifact_paths 里的 release:<tag>@<file,file> 约定
-          if [ -z "$tag" ] && [ "${IN_FILES}" != "" ]; then
-            case "${IN_FILES}" in
-              release:*)
-                spec="${IN_FILES#release:}"
-                tag="${spec%%@*}"
-                filesSpec="${spec#*@}"
-                ;;
-            esac
-          fi
+          case "${IN_PATHS}" in
+            release:*)
+              spec="${IN_PATHS#release:}"
+              [ -z "$tag" ] && tag="${spec%%@*}"
+              [ -z "$filesSpec" ] && filesSpec="${spec#*@}"
+              ;;
+          esac
           if [ -z "$tag" ]; then
             echo "::error::既没有 release_tag，artifact_paths 也不是 release:<tag>@<files> 形式"
             exit 1
@@ -377,7 +376,7 @@ jobs:
               [ -n "$part" ] && files+=("$part")
             done
           done <<< "$filesSpec"
-          echo "release tag  : $IN_TAG"
+          echo "release tag  : $tag"
           echo "release name : $name"
           echo "repo         : $THIS_REPO"
           for f in "${files[@]}"; do
