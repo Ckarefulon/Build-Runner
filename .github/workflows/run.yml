@@ -361,9 +361,13 @@ jobs:
           # applies it. GRADLE_OPTS is honoured by every wrapper/CLI invocation
           # and does not rewrite the user's command text.
           #
+          # `${GRADLE_OPTS:-}` matters: this step runs with `set -u`, so a bare
+          # `$GRADLE_OPTS` aborts the whole step with "unbound variable" when the
+          # variable was never set — which is the normal case.
+          #
           # Also disable the daemon: the runner is ephemeral, so a daemon only
           # burns memory and can hold locks when the step ends.
-          export GRADLE_OPTS="$GRADLE_OPTS -Dorg.gradle.caching=true -Dorg.gradle.daemon=false"
+          export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.caching=true -Dorg.gradle.daemon=false"
 
           started=$SECONDS
           set +e
