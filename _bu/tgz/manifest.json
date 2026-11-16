@@ -1,0 +1,32 @@
+[
+  {
+    "name": "@deepseek-ai/dsh-browser-use",
+    "version": "0.2.1-rc.2",
+    "file": "C:\\Users\\Vxiao\\Documents\\deepseek-harness\\default-workspace\\_bu\\tgz\\dsh-browser-use-0.2.1-rc.2.tgz",
+    "bytes": 5629
+  },
+  {
+    "name": "@deepseek-ai/dsh-experimental-browser-use-runtime",
+    "version": "0.2.1-rc.2",
+    "file": "C:\\Users\\Vxiao\\Documents\\deepseek-harness\\default-workspace\\_bu\\tgz\\dsh-experimental-browser-use-runtime-0.2.1-rc.2.tgz",
+    "bytes": 14440
+  },
+  {
+    "name": "@deepseek-ai/dsh-experimental-browser-use-chrome-devtools-mcp",
+    "version": "0.2.1-rc.2",
+    "file": "C:\\Users\\Vxiao\\Documents\\deepseek-harness\\default-workspace\\_bu\\tgz\\dsh-experimental-browser-use-chrome-devtools-mcp-0.2.1-rc.2.tgz",
+    "bytes": 8667
+  },
+  {
+    "name": "@deepseek-ai/schemastery",
+    "version": "3.18.5",
+    "file": "C:\\Users\\Vxiao\\Documents\\deepseek-harness\\default-workspace\\_bu\\tgz\\schemastery-3.18.5.tgz",
+    "bytes": 27570
+  },
+  {
+    "name": "@deepseek-ai/cosmokit",
+    "version": "1.8.6",
+    "file": "C:\\Users\\Vxiao\\Documents\\deepseek-harness\\default-workspace\\_bu\\tgz\\cosmokit-1.8.6.tgz",
+    "bytes": 17422
+  }
+]
