@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url'
 import { runCommand, getRunStatus, cancelRun, diagnose } from './runner.js'
 import { createClient } from './github.js'
 import { publishWorkspace, inspectBuildBranch, resetBuildBranch } from './snapshot.js'
+import { releaseArtifacts } from './release.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'))
@@ -159,6 +160,55 @@ const TOOLS = [
     },
   },
   {
+    name: 'release',
+    description:
+      '构建并**出包**：在云端跑构建命令，把产物打成压缩包，提交到目标仓库根目录的 builds 分支，' +
+      '同时在构建器仓库发布 GitHub Release 并附上包。打包在云端完成，产物不需要下载回本机再上传。' +
+      '返回包名、大小、SHA256 与 Release 链接。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: '目标仓库 owner/name（产物来源）' },
+        ref: { type: 'string', description: '目标仓库的分支/标签/SHA，默认仓库默认分支' },
+        command: {
+          type: 'string',
+          description: '构建命令。留空表示产物已存在于仓库中，直接打包。',
+        },
+        artifactPaths: {
+          type: 'string',
+          description: '必填。要打包的文件或目录，逗号/换行分隔，支持 glob，例如 "app/build/outputs/apk/**"',
+        },
+        packageName: {
+          type: 'string',
+          description: '包名（不含扩展名），默认 <仓库名>-<短SHA>',
+        },
+        releaseTag: { type: 'string', description: 'Release tag，默认同包名' },
+        releaseRepo: {
+          type: 'string',
+          description: 'Release 发到哪个仓库，默认构建器仓库。留空即发到 Build-Runner。',
+        },
+        releaseTitle: { type: 'string', description: 'Release 标题' },
+        releaseNotes: { type: 'string', description: '附加到 Release 说明里的额外内容' },
+        draft: { type: 'boolean', description: '是否发成草稿，默认 false' },
+        commitToRepo: {
+          type: 'boolean',
+          description: '是否同时把包提交到目标仓库根目录，默认 true',
+        },
+        commitBranch: {
+          type: 'string',
+          description: '接收产物的分支，默认 builds。用独立分支避免污染你的工作分支。',
+        },
+        shell: { type: 'string', enum: ['bash', 'pwsh', 'python'], description: '解释器，默认 bash' },
+        runner: { type: 'string', description: 'runner 标签，默认 ubuntu-latest' },
+        setup: { type: 'string', description: '构建前的准备命令' },
+        timeoutMinutes: { type: 'number', description: '构建超时（分钟），默认 30' },
+        wait: { type: 'boolean', description: '是否等待完成，默认 true' },
+        maxWaitMs: { type: 'number', description: '最长等待毫秒数，默认 30 分钟' },
+      },
+      required: ['repo', 'artifactPaths'],
+    },
+  },
+  {
     name: 'status',
     description: '查询某次云端运行的当前状态；已完成则直接返回完整输出和退出码。',
     inputSchema: {
@@ -237,6 +287,29 @@ async function invoke(toolName, args = {}) {
         branch: args.branch ?? 'build-runner',
       })
     }
+    case 'release': {
+      const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
+      return await releaseArtifacts(client, {
+        repo: args.repo,
+        ref: args.ref,
+        command: args.command ?? '',
+        artifactPaths: args.artifactPaths,
+        packageName: args.packageName,
+        releaseTag: args.releaseTag,
+        releaseRepo: args.releaseRepo,
+        releaseTitle: args.releaseTitle,
+        releaseNotes: args.releaseNotes,
+        draft: args.draft === true,
+        commitToRepo: args.commitToRepo !== false,
+        commitBranch: args.commitBranch,
+        shell: args.shell,
+        runner: args.runner,
+        setup: args.setup,
+        timeoutMinutes: args.timeoutMinutes,
+        wait: args.wait !== false,
+        maxWaitMs: args.maxWaitMs,
+      })
+    }
     case 'status': {
       const client = createClient({ token: process.env.BUILD_RUNNER_TOKEN })
       return await getRunStatus(client, {
@@ -257,6 +330,45 @@ async function invoke(toolName, args = {}) {
 
 /** Render a result as the text an AI can act on without a second lookup. */
 function render(value) {
+  // release result
+  if (value && typeof value === 'object' && ('release' in value || 'package' in value) && 'artifactPaths' in value) {
+    const lines = []
+    if (value.succeeded) {
+      lines.push('📦 出包成功')
+    } else if (value.buildFailed) {
+      lines.push(`❌ 构建失败（exit=${value.exitCode ?? 'n/a'}），未产出包`)
+    } else {
+      lines.push(`❌ 出包失败（${value.conclusion ?? '未完成'}）`)
+    }
+    lines.push(`仓库 ${value.repo ?? '?'} @ ${value.ref ?? '?'}${value.revision ? ` (${value.revision})` : ''}`)
+    if (value.package) {
+      const size = value.package.bytes ? `${(value.package.bytes / 1024).toFixed(1)} KiB` : '?'
+      lines.push(`包 ${value.package.name}  ${size}`)
+      if (value.package.sha256) lines.push(`SHA256 ${value.package.sha256}`)
+    }
+    if (value.release) {
+      lines.push(`Release ${value.release.tag ?? ''} ${value.release.url ?? ''}`)
+    }
+    if (value.committed) {
+      lines.push(`已提交到 ${value.repo}@${value.commitBranch}`)
+    }
+    if (value.output) {
+      lines.push('')
+      lines.push('----- 构建输出 -----')
+      lines.push(value.output)
+    }
+    if (value.failureHints?.length) {
+      lines.push('')
+      lines.push('----- 失败线索 -----')
+      for (const hint of value.failureHints) lines.push(hint)
+    }
+    if (value.note) {
+      lines.push('')
+      lines.push(value.note)
+    }
+    return lines.join('\n')
+  }
+
   // doctor: a checklist reads better than JSON.
   if (value && Array.isArray(value.checks)) {
     const lines = [`Build-Runner 自检：${value.ok ? '全部通过 ✅' : '存在问题 ❌'}`, '']
