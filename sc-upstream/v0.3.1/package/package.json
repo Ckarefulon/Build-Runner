@@ -1,0 +1,79 @@
+{
+  "name": "smart-compaction",
+  "version": "0.3.1",
+  "description": "dsh plugin: a compact_now tool letting the model trigger compaction itself at a safe point, plus a context_status tool so it can check real token usage against its context window, instead of only the automatic token-threshold trigger.",
+  "type": "module",
+  "main": "./index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "author": "joblessjoe",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JoblessJoe/smart-compaction.git"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "compaction",
+    "context-management"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.1.5-rc.3"
+    }
+  },
+  "dshhub": {
+    "schemaVersion": 1,
+    "displayName": "Smart Compaction",
+    "summary": "Gives the model a compact_now tool so it can trigger compaction itself at a safe point, plus a context_status tool to check real token usage against its context window, instead of only being interrupted by the automatic token-threshold trigger.",
+    "categories": [
+      "Sessions & Messages",
+      "Tools & Capabilities"
+    ],
+    "surfaces": [
+      "cli",
+      "web"
+    ],
+    "capabilities": {
+      "provides": [
+        "tool:compact_now",
+        "tool:context_status"
+      ]
+    },
+    "compatibility": {
+      "dsh": ">=0.1.5-rc.3",
+      "node": ">=22"
+    },
+    "permissions": {}
+  },
+  "files": [
+    "index.js",
+    "select-range.js",
+    "context-status.js",
+    "safe-point.js",
+    "cordis.patch.yml",
+    "scripts/mount-into-presets.mjs"
+  ],
+  "bin": {
+    "smart-compaction-mount-into-presets": "scripts/mount-into-presets.mjs"
+  },
+  "scripts": {
+    "postinstall": "node scripts/mount-into-presets.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-compaction": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-compaction": "0.0.1-rc.5",
+    "@deepseek-ai/dsh-llm": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-tools": "0.0.1-rc.1"
+  }
+}
