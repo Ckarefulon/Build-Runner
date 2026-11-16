@@ -76,7 +76,8 @@ on:
         default: ''
 
 permissions:
-  contents: read
+  # 写权限：Publish release 步骤要建 Release、传资产；upload-artifact 也需要它才能落地
+  contents: write
 
 env:
   PYTHONUNBUFFERED: '1'
