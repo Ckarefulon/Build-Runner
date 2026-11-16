@@ -1,0 +1,1253 @@
+/**
+ * 浏览器半边的测试：按 Web GUI 的真实方式加载发布的 bundle（桩模块表 + 桩 cordis
+ * 上下文），再断言注册结果落在宿主真正拥有的插槽上。
+ *
+ * 这一半是宿主测试覆盖不到的，而且失败后果最重 —— 一个加载了却没注册自己 id 的
+ * bundle 会让整个 Web boot 失败，所以单独在这里验。
+ */
+
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { describe, it } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { internals } from '../index.js'
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+// 按 manifest 导出的那个确切路径读，这样发布布局一旦漂移，这个测试也会红。
+const bundle = readFileSync(join(root, 'client', 'client.js'), 'utf8')
+const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+
+/** React 桩：够跑 `createElement` 和模块体（注册期间从不渲染）。 */
+const ReactStub = {
+  createElement: (type, props, ...children) => ({ type, props, children }),
+  useRef: (value) => ({ current: value }),
+  useState: (value) => [typeof value === 'function' ? value() : value, () => {}],
+  useEffect: () => {},
+  useMemo: (fn) => fn(),
+  useCallback: (fn) => fn,
+}
+
+/**
+ * 一个够用的迷你渲染器。
+ *
+ * 为什么不用上面那个一次性的桩：那一行**先渲染「正在读取」再渲染链接**，
+ * 而「链接真的显示出来了」正是这一行唯一值得断言的事。只渲染首帧的话，
+ * 测到的是 loading 文案，真正的功能一行都没验。
+ *
+ * 实现的是这个组件用到的那个子集：useState 带真实的 setter、useEffect 按依赖
+ * 数组决定要不要重跑、useCallback/useRef/useMemo 保持引用。渲染是同步递归的，
+ * 状态更新后立即重渲染（React 会批处理，这里不需要）。
+ */
+function createRenderer() {
+  let hooks = []
+  let cursor = 0
+  let scheduled = false
+  let renderFn = null
+
+  /** 深比较依赖数组（长度和每个元素）。 */
+  function sameDeps(a, b) {
+    if (a === undefined || b === undefined) return false
+    if (a.length !== b.length) return false
+    return a.every((value, index) => Object.is(value, b[index]))
+  }
+
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useRef: (value) => {
+      const index = cursor++
+      if (hooks[index] === undefined) hooks[index] = { current: value }
+      return hooks[index]
+    },
+    useState: (initial) => {
+      const index = cursor++
+      if (hooks[index] === undefined) {
+        hooks[index] = { value: typeof initial === 'function' ? initial() : initial }
+      }
+      const hook = hooks[index]
+      const setter = (next) => {
+        const value = typeof next === 'function' ? next(hook.value) : next
+        if (Object.is(value, hook.value)) return
+        hook.value = value
+        if (!scheduled) {
+          scheduled = true
+          // 同步重渲染；组件里没有跨 await 的竞态需要模拟。
+          queueMicrotask(() => {
+            scheduled = false
+            if (renderFn !== null) renderFn()
+          })
+        }
+      }
+      return [hook.value, setter]
+    },
+    useCallback: (fn, deps) => {
+      const index = cursor++
+      const previous = hooks[index]
+      if (previous === undefined || !sameDeps(previous.deps, deps)) hooks[index] = { fn, deps }
+      return hooks[index].fn
+    },
+    useMemo: (fn, deps) => {
+      const index = cursor++
+      const previous = hooks[index]
+      if (previous === undefined || !sameDeps(previous.deps, deps)) hooks[index] = { value: fn(), deps }
+      return hooks[index].value
+    },
+    useEffect: (effect, deps) => {
+      const index = cursor++
+      const previous = hooks[index]
+      if (previous !== undefined && sameDeps(previous.deps, deps)) return
+      previous?.cleanup?.()
+      // 同步跑 effect。React 的时机是「渲染后」，这里在渲染中就跑了 —— 对这个
+      // 组件没区别（它的 effect 只启动异步 fetch 和挂监听，不 setState）。
+      hooks[index] = { deps, cleanup: effect() }
+    },
+  }
+
+  return {
+    React,
+    /**
+     * 渲染一次组件。
+     * @param component - 要渲染的函数组件。
+     * @param props - 传给组件的 props。
+     * @returns 渲染结果（React 元素树）。
+     */
+    render(component, props) {
+      cursor = 0
+      renderFn = () => this.render(component, props)
+      return component(props)
+    },
+    /** 让所有已排队的微任务（含 setState 触发的重渲染）落地。 */
+    async flush() {
+      for (let i = 0; i < 12; i += 1) await Promise.resolve()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      for (let i = 0; i < 12; i += 1) await Promise.resolve()
+    },
+    /** 卸载：跑所有 cleanup。 */
+    unmount() {
+      for (const hook of hooks) hook?.cleanup?.()
+      hooks = []
+      cursor = 0
+    },
+  }
+}
+
+/**
+ * 把 bundle 装进桩环境。
+ * @param overrides - 追加/覆盖的 `window`、`document`、`navigator`、`locale`、`fetch`。
+ * @returns `{ loaded, registrations, ctx, exports, renderer, calls }`。
+ */
+function loadBundle(overrides = {}) {
+  const registrations = []
+  const calls = []
+  let loaded = null
+  const document = {
+    querySelector: () => null,
+    createElement: () => ({ setAttribute: () => {}, textContent: '', style: {} }),
+    head: { appendChild: () => {} },
+    body: { appendChild: () => {} },
+    execCommand: () => true,
+    ...(overrides.document ?? {}),
+  }
+  const window = {
+    __ModuleLoader__: {
+      load: (entry) => {
+        loaded = entry
+      },
+    },
+    location: { origin: 'http://127.0.0.1:19387' },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    ...(overrides.window ?? {}),
+  }
+  const renderer = createRenderer()
+  const require = (id) => {
+    if (id === 'react') return renderer.React
+    throw new Error(`unexpected module request: ${id}`)
+  }
+  const fetchImpl =
+    overrides.fetch === undefined
+      ? async (path, options) => {
+          calls.push({ path, options })
+          return {
+            status: 200,
+            json: async () => ({
+              ok: true,
+              phase: 'ready',
+              canRotate: true,
+              loginUrl: 'https://host.ts.net:7259/remote/SECRET',
+              plainUrl: 'https://host.ts.net:7259/',
+              cookieMaxAgeDays: 3650,
+            }),
+          }
+        }
+      : // 自定义 fetch 也照样记一遍：不记的话「点按钮有没有打到端点」就测不出来了。
+        async (path, options) => {
+          calls.push({ path, options })
+          return overrides.fetch(path, options)
+        }
+  const run = new Function('window', 'document', 'navigator', 'globalThis', 'fetch', bundle)
+  run(
+    window,
+    document,
+    overrides.navigator ?? {
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+      language: 'zh-CN',
+    },
+    window,
+    fetchImpl,
+  )
+  assert.notEqual(loaded, null, 'bundle 必须调用 window.__ModuleLoader__.load')
+
+  const moduleExports = loaded.factory(require)
+  assert.equal(typeof moduleExports, 'object')
+
+  const slots = {
+    inject: (name, register) => {
+      registrations.push({ kind: 'slots.inject', name, register })
+    },
+    register: (definition, component) => {
+      registrations.push({ kind: 'slots.register', definition, component })
+    },
+  }
+  const store = { slots }
+  if (overrides.locale !== null) {
+    store.locale = overrides.locale ?? {
+      getSnapshot: () => ({ active: 'zh', locales: [], revision: 1 }),
+      subscribe: () => () => {},
+    }
+  }
+  const ctx = {
+    ...store,
+    // 动态包的 ctx 是 Proxy：直接读服务受 inject 门禁，`get` 不受。这里照抄。
+    get: (name) => store[name],
+    effect: (fn) => {
+      const disposer = fn()
+      return () => {
+        if (typeof disposer === 'function') disposer()
+      }
+    },
+  }
+  return { loaded, registrations, ctx, exports: moduleExports, renderer, calls }
+}
+
+/** 跑一遍 `apply` 并返回它产生的注册。 */
+function applyAndCollect(overrides = {}) {
+  const env = loadBundle(overrides)
+  env.exports.apply(env.ctx)
+  return env
+}
+
+/**
+ * 把这一行渲染到「已加载」状态。
+ *
+ * 走完真实路径：apply → inject 回调 → register → 渲染首帧 → 等 fetch 落地 →
+ * 重渲染。返回的元素树就是用户看到的那一帧。
+ * @param overrides - 同 loadBundle。
+ */
+async function renderRow(overrides = {}) {
+  const env = applyAndCollect(overrides)
+  const inject = env.registrations.find((r) => r.kind === 'slots.inject')
+  // inject 回调返回 disposer；这里手工触发一次，让 register 落地。
+  inject.register()
+  const registration = env.registrations.find((r) => r.kind === 'slots.register')
+  const props = typeof registration.definition.inject === 'function' ? registration.definition.inject() : {}
+  env.renderer.render(registration.component, props)
+  await env.renderer.flush()
+  const tree = env.renderer.render(registration.component, props)
+  await env.renderer.flush()
+  return { ...env, tree, registration, props }
+}
+
+describe('浏览器半边', () => {
+  it('按 manifest 的名字注册（外壳就是按这个名字索引的）', () => {
+    const { loaded } = loadBundle()
+    assert.equal(loaded.id, manifest.name)
+    assert.equal(typeof loaded.factory, 'function')
+  })
+
+  it('导出 apply 和 inject，并且 return 了 exports', () => {
+    const { exports } = loadBundle()
+    assert.equal(typeof exports.apply, 'function')
+    assert.ok(Array.isArray(exports.inject))
+    // 什么都不返回的 bundle 会让 Web boot 失败。
+    assert.equal(typeof exports, 'object')
+  })
+
+  it('只硬依赖 slots，locale 走可选的 ctx.get', () => {
+    const { exports } = loadBundle()
+    // locale 写进 inject 会在它缺席时把整包 park 掉，所以只能硬依赖 slots。
+    assert.deepEqual(exports.inject, ['slots'])
+    // **不再**声明 `dsh.client.inject`：声明了 ui-settings-general 就会在图上多一条
+    // inject 边，于是那条 16.6 KB 的设置页组件被拉进**精简图**、白白传给手机。
+    // 去掉之后：完整模式里插槽在、照常注册那一行；精简模式里插槽不在、自然什么都不做。
+    assert.equal(manifest.dsh.client.inject, undefined, '不能再声明 dsh.client.inject')
+    assert.equal(manifest.dsh.client.platform, 'web')
+  })
+
+  it('是合法 JavaScript 且是合法 UTF-8', () => {
+    const source = readFileSync(join(root, 'client', 'client.js'), 'utf8')
+    assert.equal(source.includes('\uFFFD'), false, 'bundle 里出现了 U+FFFD 替换字符')
+    // 本机 PowerShell 往返读写会把 UTF-8 中文变成这些序列。
+    assert.equal(/鐗|缃戦|鈥|锛|鍜|浣|绋/.test(source), false, 'bundle 里出现了乱码')
+    assert.ok((source.match(/[\u4e00-\u9fff]/g) ?? []).length > 100, '中文文案缺失')
+    // 解析才是真正的语法测试：上面的 loadBundle 只走到它执行到的那条路径。
+    assert.doesNotThrow(() => new Function(source))
+  })
+})
+
+describe('注册', () => {
+  it('往「设置 → 通用」注册一行，id 用自己的', () => {
+    const { registrations } = applyAndCollect()
+    const inject = registrations.filter((r) => r.kind === 'slots.inject')
+    // 三处：设置页那一行（手机链接）+ 侧边栏底部的两格（精简/完整开关、通知铃铛）。
+    assert.equal(inject.length, 3)
+    assert.deepEqual(inject.map((r) => r.name).sort(), [
+      'settings.general.item',
+      'sidebar.footer.action',
+      'sidebar.footer.action',
+    ])
+    assert.equal(inject[0].name, 'settings.general.item', '这一行的座位就是通用设置的行插槽')
+
+    // register 只在 inject 回调里发生 —— 这正是「插槽还没声明时不要硬注册」的写法。
+    assert.equal(registrations.filter((r) => r.kind === 'slots.register').length, 0, 'apply 阶段不该直接注册')
+
+    inject[0].register()
+    const registers = registrations.filter((r) => r.kind === 'slots.register')
+    assert.equal(registers.length, 1, 'inject 回调被调用时只注册一行')
+    const definition = registers[0].definition
+    assert.equal(definition.name, 'settings.general.item')
+    assert.equal(definition.id, 'dsh-tailscale-remote', '用自己的 id，不要占用宿主那几行的 id')
+    assert.equal(typeof definition.order, 'number')
+    // 排在 current-version(100) 之前，别顶到最下面去。
+    assert.ok(definition.order < 100, 'order 必须小于 current-version 的 100')
+    assert.ok(definition.order > 30, 'order 要排在 performance-usage(30) 之后')
+  })
+
+  it('底部开关注册到 sidebar.footer.action（精简页面上它顶替被藏掉的设置入口）', () => {
+    const { registrations } = applyAndCollect()
+    const inject = registrations.filter((r) => r.kind === 'slots.inject')
+    const footer = inject.find((r) => r.name === 'sidebar.footer.action')
+    assert.ok(footer !== undefined, '必须注册到侧边栏底部那个插槽')
+
+    footer.register()
+    const registration = registrations.find(
+      (r) => r.kind === 'slots.register' && r.definition.name === 'sidebar.footer.action',
+    )
+    assert.ok(registration !== undefined)
+    assert.equal(registration.definition.id, 'dsh-tailscale-remote', '用自己的 id')
+    assert.equal(typeof registration.component, 'function')
+    assert.equal(typeof registration.definition.inject, 'function', '要靠 inject 面把 ctx 递进去')
+  })
+
+  it('注册的不是宿主已有的任何一行', () => {
+    const { registrations } = applyAndCollect()
+    registrations.find((r) => r.kind === 'slots.inject').register()
+    const id = registrations.find((r) => r.kind === 'slots.register').definition.id
+    // 这些是宿主自己占掉的 id（见 ui-settings-general / ui-theme 的注册）。
+    for (const taken of ['developer-tools', 'current-version', 'appearance', 'font-size', 'permission', 'language']) {
+      assert.notEqual(id, taken, `id ${taken} 是宿主的，占用会替换掉那一行`)
+    }
+  })
+
+  it('组件是函数，并且通过 inject 面拿到 ctx（插槽的 standard props 里没有它）', () => {
+    const { registrations } = applyAndCollect()
+    registrations.find((r) => r.kind === 'slots.inject').register()
+    const registration = registrations.find((r) => r.kind === 'slots.register')
+    assert.equal(typeof registration.component, 'function')
+    assert.equal(typeof registration.definition.inject, 'function', '必须靠 inject 面把 ctx 递进去')
+    const props = registration.definition.inject()
+    assert.equal(typeof props.ctx, 'object')
+    assert.equal(typeof props.ctx.get, 'function')
+  })
+})
+
+describe('渲染出来的一行', () => {
+  /** 从渲染结果里收集所有字符串。 */
+  function stringsOf(node, out = []) {
+    if (node === null || node === undefined || typeof node === 'boolean') return out
+    if (typeof node === 'string') {
+      out.push(node)
+      return out
+    }
+    if (Array.isArray(node)) {
+      for (const child of node) stringsOf(child, out)
+      return out
+    }
+    if (typeof node === 'object' && node.children !== undefined) {
+      stringsOf(node.children, out)
+      return out
+    }
+    return out
+  }
+
+  /** 深度找所有满足谓词的节点。 */
+  function find(node, predicate, out = []) {
+    if (node === null || node === undefined || typeof node === 'boolean') return out
+    if (Array.isArray(node)) {
+      for (const child of node) find(child, predicate, out)
+      return out
+    }
+    if (typeof node !== 'object') return out
+    if (predicate(node)) out.push(node)
+    if (node.children !== undefined) find(node.children, predicate, out)
+    return out
+  }
+
+  const ZH_LOCALE = { getSnapshot: () => ({ active: 'zh', locales: [], revision: 1 }), subscribe: () => () => {} }
+  const EN_LOCALE = { getSnapshot: () => ({ active: 'en', locales: [], revision: 1 }), subscribe: () => () => {} }
+
+  it('取到状态后把手机登录链接显示在只读输入框里', async () => {
+    const { tree } = await renderRow({ locale: ZH_LOCALE })
+    const inputs = find(tree, (node) => node.type === 'input')
+    assert.equal(inputs.length, 1, '就一个链接框')
+    assert.equal(inputs[0].props.readOnly, true)
+    assert.equal(inputs[0].props.value, 'https://host.ts.net:7259/remote/SECRET')
+  })
+
+  it('只请求这一个状态端点，且带同源凭据', async () => {
+    const { calls } = await renderRow({ locale: ZH_LOCALE })
+    assert.equal(calls.length, 1, '挂载时只取一次状态（不轮询）')
+    assert.equal(calls[0].path, '/api/dsh-tailscale-remote/state')
+    assert.equal(calls[0].options.credentials, 'same-origin')
+  })
+
+  it('中文环境下给中文，不出现字面量 key', async () => {
+    const { tree } = await renderRow({ locale: ZH_LOCALE })
+    const text = stringsOf(tree).join('\n')
+    assert.ok(text.includes('手机连接'), '标题必须是中文')
+    assert.ok(text.includes('手机登录链接'), '要有链接那一行的标签')
+    assert.ok(text.includes('更换密钥'), '要有更换密钥的入口')
+    // 字面量 key 泄漏是最典型的 i18n bug（兜底表漏键时会直接把 key 显示出来）。
+    assert.equal(/\b(row|label|title|description|copy|rotate)\.[a-zA-Z]/.test(text), false, '文案里出现了字面量 key')
+    assert.equal(text.includes('undefined'), false, '文案里出现了 undefined')
+  })
+
+  it('英文环境下给英文', async () => {
+    const { tree } = await renderRow({ locale: EN_LOCALE })
+    const text = stringsOf(tree).join('\n')
+    assert.ok(text.includes('Phone access'), '标题必须是英文')
+    assert.ok(text.includes('Change key'), '要有更换密钥的入口')
+    assert.equal(/[\u4e00-\u9fff]/.test(text), false, '英文环境下不该出现中文')
+  })
+
+  it('拿不到 locale 服务时按浏览器语言兜底（而不是崩掉或显示 key）', async () => {
+    const { tree } = await renderRow({ locale: null, navigator: { language: 'zh-CN', userAgent: 'x' } })
+    const text = stringsOf(tree).join('\n')
+    assert.ok(text.includes('手机连接'), 'navigator.language=zh-CN 时应当说中文')
+    assert.equal(text.includes('undefined'), false)
+  })
+
+  it('拿不到 locale 服务且浏览器是英文时说英文', async () => {
+    const { tree } = await renderRow({ locale: null, navigator: { language: 'en-US', userAgent: 'x' } })
+    assert.ok(stringsOf(tree).join('\n').includes('Phone access'))
+  })
+
+  // —— 精简模式那一段 ——————————————————————————————————————————————————————
+
+  /** 状态端点带精简字段的桩；同时应答 lite 切换端点（有状态地跟着翻转）。 */
+  const liteFetch = (lite, overrides = {}) => {
+    let current = lite
+    return async (path, options) => {
+      if (path === '/api/dsh-tailscale-remote/lite') {
+        current = JSON.parse(options.body).enabled
+        return { status: 200, json: async () => ({ ok: true, lite: current }) }
+      }
+      if (path !== '/api/dsh-tailscale-remote/state') throw new Error(`unexpected ${path}`)
+      return {
+        status: 200,
+        json: async () => ({
+          ok: true,
+          phase: 'ready',
+          canRotate: true,
+          loginUrl: 'https://host.ts.net:7259/remote/SECRET',
+          plainUrl: 'https://host.ts.net:7259/',
+          cookieMaxAgeDays: 3650,
+          liteAvailable: true,
+          lite: current,
+          liteChoice: current,
+          liteDefault: true,
+          liteCount: 35,
+          litePreloadRemoved: 2,
+          ...overrides,
+        }),
+      }
+    }
+  }
+
+  it('精简开关**不再**出现在设置页那一行里（用户要求只在 Remote 端那处）', async () => {
+    const { tree } = await renderRow({ locale: ZH_LOCALE, fetch: liteFetch(true) })
+    const text = stringsOf(tree).join('\n')
+    // 设置行只负责手机链接与换密钥；精简模式那一段已经移走。
+    assert.equal(text.includes('精简模式'), false, '设置行里不该再有精简模式那一段')
+    assert.ok(text.includes('手机连接'), '手机链接那一行还在')
+    assert.ok(text.includes('更换密钥'), '换密钥还在')
+  })
+
+  it('图标绝不用 emoji（🟢🟡🔴 只允许出现在通知标题那三条文案里）', () => {
+    const source = readFileSync(join(root, 'client', 'client.js'), 'utf8')
+    const emoji = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u
+    const allowed = /notify(?:Done|Question|Error)Title:/
+    const offenders = source
+      .split('\n')
+      .filter((line) => emoji.test(line) && !allowed.test(line))
+      .map((line) => line.trim())
+    assert.deepEqual(offenders, [], 'emoji 只能当通知文案，不能当图标')
+    // 顺带保证那三条文案真的还在（否则上面那条断言会变成「哪里都没有 emoji」的空转）。
+    assert.equal((source.match(/notify(?:Done|Question|Error)Title:/g) ?? []).length, 6, '中英各三条通知标题')
+  })
+
+  it('客户端写死的三个路径与宿主注册的逐字一致', () => {
+    // 两半各存一份路径表，这是刻意的（bundle 不能 import 宿主代码）。代价是漂移
+    // 会**静默**失败：前端 fetch 一个没人注册的路径，得到 404，界面上只显示
+    // 「HTTP 404」，看不出是路径写错了。所以这里显式把两份钉在一起。
+    assert.ok(bundle.includes(`'${internals.STATE_PATH}'`), `bundle 里必须出现 ${internals.STATE_PATH}`)
+    assert.ok(bundle.includes(`'${internals.ROTATE_PATH}'`), `bundle 里必须出现 ${internals.ROTATE_PATH}`)
+    assert.ok(bundle.includes(`'${internals.LITE_PATH}'`), `bundle 里必须出现 ${internals.LITE_PATH}`)
+  })
+
+  it('三个路径都在 /api 前缀下（否则会绕过 DSH 的 fence 与鉴权）', () => {
+    for (const path of [internals.STATE_PATH, internals.ROTATE_PATH, internals.LITE_PATH]) {
+      assert.ok(path.startsWith('/api/'), `${path} 必须在 /api 下`)
+      // 照抄 connection 的 endpointFromPath：剥掉 `/api/` 之后按 `/` 切，
+      // 每个 segment 都不能是空、`.` 或 `..`（否则注册时直接抛错）。
+      const endpoint = path.slice('/api/'.length)
+      assert.notEqual(endpoint, '')
+      for (const segment of endpoint.split('/')) {
+        assert.equal(['', '.', '..'].includes(segment), false, `${path} 的 segment ${JSON.stringify(segment)} 非法`)
+        assert.match(segment, /^[A-Za-z0-9_$.-]+$/, `${path} 的 segment 含非法字符`)
+      }
+    }
+  })
+})
+
+describe('切换控件：挂到宿主已有的两个位置上', () => {
+    /** 取到 LiteSwitch 的注册与组件。 */
+    function footerRegistration(overrides = {}) {
+      const { registrations } = applyAndCollect(overrides)
+      const inject = registrations.filter((r) => r.kind === 'slots.inject').find((r) => r.name === 'sidebar.footer.action')
+      inject.register()
+      const registration = registrations.find(
+        (r) => r.kind === 'slots.register' && r.definition.name === 'sidebar.footer.action',
+      )
+      assert.ok(registration !== undefined, '必须注册到底部插槽（它只是承载点，界面不在这里）')
+      return registration
+    }
+
+    /** 状态端点返回指定 lite 状态。 */
+    function stateFetch(lite) {
+      return async (path) => {
+        if (path === '/api/dsh-tailscale-remote/state') {
+          return { status: 200, json: async () => ({ ok: true, lite, liteAvailable: true }) }
+        }
+        return { status: 200, json: async () => ({ ok: true, lite: !lite }) }
+      }
+    }
+
+    it('组件本身不渲染可见内容（界面全部挂到宿主节点上）', async () => {
+      const registration = footerRegistration({ fetch: stateFetch(true) })
+      // renderer 在 applyAndCollect 内部，这里只要它能返回 null 且不抛。
+      assert.equal(typeof registration.component, 'function')
+      assert.equal(registration.definition.name, 'sidebar.footer.action')
+    })
+
+    it('桌面窗口里根本不注册底部插槽（桌面端一个字节都不动）', () => {
+      const { registrations } = applyAndCollect({ window: { dshDesktopBoot: { ready: async () => ({}) } } })
+      const footer = registrations.filter((r) => r.kind === 'slots.inject').find((r) => r.name === 'sidebar.footer.action')
+      assert.equal(footer, undefined, '桌面窗口里不该有这个插槽')
+    })
+
+    it('精简与完整两个模式都**必须**有入口（否则切过去就回不来）', async () => {
+      // 用户报过：只在精简页面上显示 → 切到完整版后没有切回来的入口。
+      // 现在两处都在，所以断言的是「两个状态都能拿到可用组件」——真正的 DOM 行为
+      // 由下面那组 DOM 增强测试覆盖。
+      for (const lite of [true, false]) {
+        const registration = footerRegistration({ fetch: stateFetch(lite) })
+        assert.equal(typeof registration.component, 'function', `lite=${lite} 时组件必须存在`)
+      }
+    })
+
+    /** 状态端点：精简可用（按钮才会渲染）。 */
+    const availableFetch = () => async (path) => {
+      if (path === '/api/dsh-tailscale-remote/state') {
+        return { status: 200, json: async () => ({ ok: true, phase: 'ready', liteAvailable: true }) }
+      }
+      return { status: 200, json: async () => ({ ok: true }) }
+    }
+
+    /**
+     * 把切换按钮渲染到「状态已落地」的那一帧，并把按钮本身取出来。
+     *
+     * `window.__DSH_TAILSCALE_REMOTE_LITE__` 就是宿主改写 index 时种下的「这份页面是哪一版」
+     * 标记 —— 测试通过它模拟「现在看到的是精简页 / 完整页」。
+     */
+    async function renderSwitch({ pageIsLite, ...overrides } = {}) {
+      const window = pageIsLite ? { __DSH_TAILSCALE_REMOTE_LITE__: 'lite' } : {}
+      const env = applyAndCollect({ ...overrides, window })
+      const inject = env.registrations.filter((r) => r.kind === 'slots.inject').find((r) => r.name === 'sidebar.footer.action')
+      inject.register()
+      const registration = env.registrations.find(
+        (r) => r.kind === 'slots.register' && r.definition.name === 'sidebar.footer.action',
+      )
+      const props = registration.definition.inject()
+      env.renderer.render(registration.component, props)
+      await env.renderer.flush()
+      const tree = env.renderer.render(registration.component, props)
+      await env.renderer.flush()
+      return { ...env, tree, registration, props }
+    }
+
+    it('精简页上按钮说「切至完整模式」，点下去让宿主开一次完整页授权（enabled=false）', async () => {
+      const { tree, renderer, calls } = await renderSwitch({ pageIsLite: true, fetch: availableFetch() })
+      assert.equal(tree.type, 'button', '精简页上必须渲染出按钮')
+      assert.equal(tree.props['aria-label'], '切至完整模式')
+
+      tree.props.onClick()
+      await renderer.flush()
+      const post = calls.find((call) => call.path === '/api/dsh-tailscale-remote/lite')
+      assert.ok(post !== undefined, '必须打到精简开关端点（客户端记不住这件事，只有宿主知道下一版页面发什么）')
+      assert.equal(post.options.method, 'POST')
+      assert.equal(JSON.parse(post.options.body).enabled, false, '切至完整 = enabled=false（开完整页授权）')
+    })
+
+    it('完整页上按钮说「切至精简模式」，点下去立刻撤销授权（enabled=true）', async () => {
+      const { tree, renderer, calls } = await renderSwitch({ pageIsLite: false, fetch: availableFetch() })
+      assert.equal(tree.props['aria-label'], '切至精简模式')
+
+      tree.props.onClick()
+      await renderer.flush()
+      const post = calls.find((call) => call.path === '/api/dsh-tailscale-remote/lite')
+      assert.equal(JSON.parse(post.options.body).enabled, true, '切回精简 = enabled=true（撤销窗口）')
+    })
+
+    it('文案按「正在看的这份页面」说话，而不是按状态端点里的 lite（两者在切换瞬间是反的）', async () => {
+      // 状态端点说「下一次渲染会裁」（lite=true），但这份页面其实是完整页。
+      // 按状态端点说话就会写成「切至完整模式」—— 点了等于原地转圈。
+      const { tree } = await renderSwitch({
+        pageIsLite: false,
+        fetch: async (path) => {
+          if (path === '/api/dsh-tailscale-remote/state') {
+            return { status: 200, json: async () => ({ ok: true, lite: true, liteAvailable: true }) }
+          }
+          return { status: 200, json: async () => ({ ok: true }) }
+        },
+      })
+      assert.equal(tree.props['aria-label'], '切至精简模式')
+    })
+
+    it('这台 DSH 没有精简模式（liteAvailable=false）时不渲染按钮', async () => {
+      const { tree } = await renderSwitch({
+        pageIsLite: false,
+        fetch: async () => ({ status: 200, json: async () => ({ ok: true, liteAvailable: false }) }),
+      })
+      assert.equal(tree, null)
+    })
+  })
+
+  describe('图标本身符合 DSH 规范', () => {
+    it('16×16、viewBox 0 0 16 16、strokeWidth 在 svg 上、path 用 currentColor', () => {
+      // 直接对源码里的图标定义逐项断言（DOM 增强用的就是这一份字符串版）。
+      const expected = [
+        'viewBox="0 0 16 16"',
+        'fill="none"',
+        'stroke-width=',
+        'stroke="currentColor"',
+        'aria-hidden="true"',
+      ]
+      const source = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+      const at = source.indexOf('function LITE_ICON_SVG')
+      assert.ok(at > 0, '必须有 SVG 字符串版（DOM 增强要用）')
+      const seg = source.slice(at, at + 1400)
+      for (const part of expected) assert.ok(seg.includes(part), `图标定义里缺 ${part}`)
+      // 绝不能用 emoji 或文字当图标。
+      assert.equal(/[\u{1F300}-\u{1FAFF}]/u.test(seg), false, '不许用 emoji')
+      // React 版与字符串版必须是同一枚图标（两条 path 的 d 一致）。
+      const reactAt = source.indexOf('function LiteSwitchIcon')
+      const reactSeg = source.slice(reactAt, reactAt + 1200)
+      for (const d of ['M3 5.5h8.5', 'M13 10.5H4.5']) {
+        assert.ok(reactSeg.includes(d), `React 版图标缺 path ${d}`)
+        assert.ok(seg.includes(d), `字符串版图标缺 path ${d}`)
+      }
+    })
+
+    it('切换按钮**不寄生**在宿主的设置按钮上（这是之前反复翻车的根因）', () => {
+      const source = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+      // 早先几版用 DOM 增强去改设置按钮的图标/文字/点击，于是「抽掉
+      // ui-settings-general」时切换按钮跟着消失。那种寄生做法必须彻底消失。
+      assert.equal(source.includes('useSwitchHook'), false, '寄生式 DOM 增强必须删掉')
+      assert.equal(source.includes('[data-slot="settings.trigger"]'), false, '不许再改设置触发按钮')
+      assert.equal(source.includes('data-dsh-lite-seat'), false, '不许再占用设置那一格')
+      assert.equal(source.includes('data-dsh-tailscale-remote-floating'), false, '不许再往用户名行塞浮动图标')
+      // 它必须有自己的座位：`sidebar.footer.action`（由 ui-sidebar 声明，
+      // inject 里不含 ui-settings-general，所以精简图里也一定在）。
+      assert.ok(source.includes("'sidebar.footer.action'"), '切换按钮要注册在 sidebar.footer.action 上')
+    })
+  })
+
+describe('换密钥', () => {
+  const ZH_LOCALE = { getSnapshot: () => ({ active: 'zh', locales: [], revision: 1 }), subscribe: () => () => {} }
+
+  function find(node, predicate, out = []) {
+    if (node === null || node === undefined || typeof node === 'boolean') return out
+    if (Array.isArray(node)) {
+      for (const child of node) find(child, predicate, out)
+      return out
+    }
+    if (typeof node !== 'object') return out
+    if (predicate(node)) out.push(node)
+    if (node.children !== undefined) find(node.children, predicate, out)
+    return out
+  }
+
+  /** 按可见文字找按钮。 */
+  function buttonWith(tree, label) {
+    return find(tree, (node) => node.type === 'button' && node.children.includes(label))[0]
+  }
+
+  it('先要一次确认，确认后才真的 POST（换密钥会让旧链接失效）', async () => {
+    const { tree, renderer, registration, props, calls } = await renderRow({ locale: ZH_LOCALE })
+
+    const trigger = buttonWith(tree, '更换密钥')
+    assert.ok(trigger !== undefined, '要有「更换密钥」按钮')
+    assert.equal(trigger.props.disabled, false, '就绪状态下按钮可用')
+    trigger.props.onClick()
+    await renderer.flush()
+
+    // 第一次点击只进入确认态，绝不发请求。
+    assert.equal(calls.length, 1, '点第一下不能就换了')
+
+    const afterConfirm = renderer.render(registration.component, props)
+    await renderer.flush()
+    assert.ok(buttonWith(afterConfirm, '确认更换') !== undefined, '要出现确认按钮')
+    assert.ok(buttonWith(afterConfirm, '取消') !== undefined, '要能取消')
+
+    buttonWith(afterConfirm, '确认更换').props.onClick()
+    await renderer.flush()
+
+    const rotateCall = calls.find((c) => c.path === '/api/dsh-tailscale-remote/rotate')
+    assert.ok(rotateCall !== undefined, '确认后必须 POST 那个端点')
+    assert.equal(rotateCall.options.method, 'POST')
+  })
+
+  it('取消不发请求', async () => {
+    const { tree, renderer, registration, props, calls } = await renderRow({ locale: ZH_LOCALE })
+    buttonWith(tree, '更换密钥').props.onClick()
+    await renderer.flush()
+    const afterConfirm = renderer.render(registration.component, props)
+    await renderer.flush()
+    buttonWith(afterConfirm, '取消').props.onClick()
+    await renderer.flush()
+    assert.equal(calls.filter((c) => c.path.endsWith('/rotate')).length, 0, '取消不能发请求')
+  })
+
+  it('canRotate=false 时按钮是禁用的（没就绪 / 登录入口关了）', async () => {
+    const { tree } = await renderRow({
+      locale: ZH_LOCALE,
+      fetch: async () => ({
+        status: 200,
+        json: async () => ({
+          ok: true,
+          phase: 'starting',
+          canRotate: false,
+          loginUrl: null,
+          plainUrl: null,
+          cookieMaxAgeDays: 3650,
+        }),
+      }),
+    })
+    const trigger = buttonWith(tree, '更换密钥')
+    assert.ok(trigger !== undefined)
+    assert.equal(trigger.props.disabled, true, '没就绪就不该允许换密钥')
+    // 没就绪时要说清楚现在到哪一步了，而不是显示一个空链接框。
+    const inputs = find(tree, (node) => node.type === 'input')
+    assert.equal(inputs[0].props.value, '')
+  })
+
+  it('换密钥失败时把原因显示出来（不是静默失败）', async () => {
+    let rotated = false
+    const { tree, renderer, registration, props } = await renderRow({
+      locale: ZH_LOCALE,
+      fetch: async (path) => {
+        if (path.endsWith('/rotate')) {
+          rotated = true
+          return { status: 409, json: async () => ({ ok: false, error: '远程访问还没就绪，稍后再试' }) }
+        }
+        return {
+          status: 200,
+          json: async () => ({
+            ok: true,
+            phase: 'ready',
+            canRotate: true,
+            loginUrl: 'https://host.ts.net:7259/remote/OLD',
+            plainUrl: 'https://host.ts.net:7259/',
+            cookieMaxAgeDays: 3650,
+          }),
+        }
+      },
+    })
+    buttonWith(tree, '更换密钥').props.onClick()
+    await renderer.flush()
+    buttonWith(renderer.render(registration.component, props), '确认更换').props.onClick()
+    await renderer.flush()
+    assert.equal(rotated, true)
+
+    const text = (function collect(node, out = []) {
+      if (typeof node === 'string') out.push(node)
+      else if (Array.isArray(node)) node.forEach((c) => collect(c, out))
+      else if (node !== null && typeof node === 'object' && node.children !== undefined) collect(node.children, out)
+      return out
+    })(renderer.render(registration.component, props)).join('\n')
+    assert.ok(text.includes('远程访问还没就绪'), `失败原因必须显示出来，实际是：${text}`)
+  })
+
+  it('拿不到状态端点时给出错误和重试，而不是空界面', async () => {
+    const { tree } = await renderRow({
+      locale: ZH_LOCALE,
+      fetch: async () => ({ status: 500, json: async () => ({ ok: false, error: 'boom' }) }),
+    })
+    const alerts = find(tree, (node) => node.props?.role === 'alert')
+    assert.equal(alerts.length, 1, '必须有 role=alert 的错误区')
+    const text = (function collect(node, out = []) {
+      if (typeof node === 'string') out.push(node)
+      else if (Array.isArray(node)) node.forEach((c) => collect(c, out))
+      else if (node !== null && typeof node === 'object' && node.children !== undefined) collect(node.children, out)
+      return out
+    })(alerts[0]).join(' ')
+    assert.ok(text.includes('boom'), '要把真正的原因显示出来')
+    assert.ok(text.includes('重试'), '要能重试')
+  })
+
+  it('非 200 但 body 是 JSON 时，用的是 body 里的原因（不拿状态码覆盖原文）', async () => {
+    const { tree } = await renderRow({
+      locale: ZH_LOCALE,
+      fetch: async () => ({ status: 503, json: async () => ({ ok: false, error: '还没起来' }) }),
+    })
+    const alerts = find(tree, (node) => node.props?.role === 'alert')
+    const text = (function collect(node, out = []) {
+      if (typeof node === 'string') out.push(node)
+      else if (Array.isArray(node)) node.forEach((c) => collect(c, out))
+      else if (node !== null && typeof node === 'object' && node.children !== undefined) collect(node.children, out)
+      return out
+    })(alerts[0]).join(' ')
+    assert.ok(text.includes('还没起来'), `应当用 body 里的 error，实际：${text}`)
+    assert.equal(text.includes('503'), false, '不该拿状态码覆盖掉真正的原因')
+  })
+
+  /**
+   * 换密钥的警告文案必须跟着**实际行为**走。
+   *
+   * 这是最容易变成谎言的一处：默认行为是连会话一起吊销（所有设备退出），
+   * 如果文案还写着「已经登录的设备不受影响」，用户就会以为只是换个链接，
+   * 结果手机被踢下线还不知道为什么。
+   */
+  it('revokesSessions=true 时，警告明说所有设备都会退出', async () => {
+    const { tree, renderer, registration, props } = await renderRow({
+      locale: ZH_LOCALE,
+      fetch: async () => ({
+        status: 200,
+        json: async () => ({
+          ok: true,
+          phase: 'ready',
+          canRotate: true,
+          revokesSessions: true,
+          loginUrl: 'https://host.ts.net:7259/remote/OLD',
+          plainUrl: 'https://host.ts.net:7259/',
+          cookieMaxAgeDays: 3650,
+        }),
+      }),
+    })
+    buttonWith(tree, '更换密钥').props.onClick()
+    await renderer.flush()
+    const text = (function collect(node, out = []) {
+      if (typeof node === 'string') out.push(node)
+      else if (Array.isArray(node)) node.forEach((c) => collect(c, out))
+      else if (node !== null && typeof node === 'object' && node.children !== undefined) collect(node.children, out)
+      return out
+    })(renderer.render(registration.component, props)).join('\n')
+    assert.ok(text.includes('所有已登录的设备都会退出'), `警告必须说清后果，实际：${text}`)
+    assert.equal(text.includes('不受影响'), false, '不能同时说「不受影响」——那是反的')
+  })
+
+  it('revokesSessions=false 时才说「已登录的设备不受影响」', async () => {
+    const { tree, renderer, registration, props } = await renderRow({
+      locale: ZH_LOCALE,
+      fetch: async () => ({
+        status: 200,
+        json: async () => ({
+          ok: true,
+          phase: 'ready',
+          canRotate: true,
+          revokesSessions: false,
+          loginUrl: 'https://host.ts.net:7259/remote/OLD',
+          plainUrl: 'https://host.ts.net:7259/',
+          cookieMaxAgeDays: 3650,
+        }),
+      }),
+    })
+    buttonWith(tree, '更换密钥').props.onClick()
+    await renderer.flush()
+    const text = (function collect(node, out = []) {
+      if (typeof node === 'string') out.push(node)
+      else if (Array.isArray(node)) node.forEach((c) => collect(c, out))
+      else if (node !== null && typeof node === 'object' && node.children !== undefined) collect(node.children, out)
+      return out
+    })(renderer.render(registration.component, props)).join('\n')
+    assert.ok(text.includes('不受影响'), `实际：${text}`)
+    assert.equal(text.includes('所有已登录的设备都会退出'), false)
+  })
+})
+
+describe('桌面端一个字节都不准动', () => {
+  it('桌面窗口（有 dshDesktopBoot）里**原有的设置条目照旧注册**', () => {
+    // `dshDesktopBoot` 只由 Electron preload 用 contextBridge 注入；有它 = 桌面窗口。
+    // 关键：设置页那一行（手机连接 + 换密钥）是这个插件**原本就有**的功能，
+    // 「精简模式只在远程端」绝不能把它连带删掉 —— 那是删掉既有功能，不是「不加字节」。
+    const { registrations } = applyAndCollect({ window: { dshDesktopBoot: { ready: async () => ({}) } } })
+    const injects = registrations.filter((r) => r.kind === 'slots.inject')
+    assert.equal(injects.length, 1, '桌面里只注册设置页那一行')
+    assert.equal(injects[0].name, 'settings.general.item', '桌面也必须保留手机连接那一行')
+  })
+
+  it('桌面窗口里**不注册**精简模式图标（那是新增的，只在远程端）', () => {
+    const { registrations } = applyAndCollect({ window: { dshDesktopBoot: { ready: async () => ({}) } } })
+    const footer = registrations.filter((r) => r.kind === 'slots.inject').find((r) => r.name === 'sidebar.footer.action')
+    assert.equal(footer, undefined, '桌面窗口里不该有那个图标')
+  })
+
+  it('手机页面（没有 dshDesktopBoot）里照常注册', () => {
+    const { registrations } = applyAndCollect({ window: {} })
+    const injects = registrations.filter((r) => r.kind === 'slots.inject')
+    assert.equal(injects.length, 3, '手机页面上要注册设置行 + 底部两格（切换、通知）')
+  })
+
+
+})
+
+describe('状态通知（浏览器这一半）', () => {
+  const STATE_ENDPOINT = '/api/dsh-tailscale-remote/state'
+  const FEED_ENDPOINT = '/api/dsh-tailscale-remote/notify/feed'
+  const SWITCH_ENDPOINT = '/api/dsh-tailscale-remote/notify'
+  const DEVICE_KEY = 'dsh-tailscale-remote.notify'
+  const ZH_LOCALE = { getSnapshot: () => ({ active: 'zh', locales: [], revision: 1 }), subscribe: () => () => {} }
+
+  /** 假的通知实现：记下每次弹出的标题、正文与 tag。 */
+  function fakeNotifications(permission = 'granted') {
+    const shown = []
+    function FakeNotification(title, options) {
+      shown.push({ title, body: options?.body, tag: options?.tag })
+      this.close = () => {}
+      this.onclick = null
+    }
+    FakeNotification.permission = permission
+    FakeNotification.requestPermission = async () => permission
+    return { Notification: FakeNotification, shown }
+  }
+
+  /** 假的 localStorage。 */
+  function fakeStorage() {
+    const map = new Map()
+    return {
+      map,
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, value) => map.set(key, String(value)),
+      removeItem: (key) => map.delete(key),
+    }
+  }
+
+  /**
+   * 只记录、不真正计时的定时器。
+   *
+   * 重要性不在于「测得准」，而在于**测试进程不能被 interval 吊住**：真实 setInterval
+   * 会让 node --test 永远不退出。
+   */
+  function fakeTimers() {
+    const entries = []
+    return {
+      entries,
+      setInterval: (fn, ms) => {
+        entries.push({ fn, ms })
+        return entries.length
+      },
+      clearInterval: (id) => {
+        const entry = entries[id - 1]
+        if (entry !== undefined) entry.cleared = true
+      },
+    }
+  }
+
+  /** 状态端点 + 通知 feed + 总开关端点的桩（总开关是有状态的，点一下要真的翻）。 */
+  function notifyFetch({ state = {}, feed = () => ({ notify: true, cursor: 0, events: [] }) } = {}) {
+    let notify = state.notify !== false
+    return async (path, options) => {
+      if (path === STATE_ENDPOINT) {
+        return {
+          status: 200,
+          json: async () => ({
+            ok: true,
+            phase: 'ready',
+            canRotate: false,
+            loginUrl: null,
+            plainUrl: null,
+            cookieMaxAgeDays: 3650,
+            notifyAvailable: true,
+            ...state,
+            notify,
+          }),
+        }
+      }
+      if (path.startsWith(FEED_ENDPOINT)) {
+        const since = path.includes('since=') ? Number(path.slice(path.indexOf('since=') + 6)) : null
+        return { status: 200, json: async () => ({ ok: true, ...feed(since) }) }
+      }
+      if (path === SWITCH_ENDPOINT) {
+        notify = JSON.parse(options.body).enabled === true
+        return { status: 200, json: async () => ({ ok: true, notify, persisted: false }) }
+      }
+      throw new Error(`unexpected ${path}`)
+    }
+  }
+
+  /** 一个假的浏览器环境：通知 + localStorage + 定时器全套。 */
+  function browserEnv({ permission = 'granted', alerts = [], document: doc } = {}) {
+    const notes = fakeNotifications(permission)
+    const storage = fakeStorage()
+    const timers = fakeTimers()
+    return {
+      notes,
+      storage,
+      timers,
+      alerts,
+      window: {
+        Notification: notes.Notification,
+        localStorage: storage,
+        setInterval: timers.setInterval,
+        clearInterval: timers.clearInterval,
+        alert: (message) => alerts.push(message),
+      },
+      document: doc,
+    }
+  }
+
+  /** 渲染底部那一格的铃铛（id 以 -notify 结尾的那个注册）。 */
+  async function renderBell(overrides = {}) {
+    const env = applyAndCollect(overrides)
+    for (const inject of env.registrations.filter((r) => r.kind === 'slots.inject')) inject.register()
+    const registration = env.registrations.find(
+      (r) => r.kind === 'slots.register' && r.definition.id === 'dsh-tailscale-remote-notify',
+    )
+    assert.ok(registration !== undefined, '必须给铃铛单独占一格（id 不能和切换按钮重复）')
+    const props = registration.definition.inject()
+    env.renderer.render(registration.component, props)
+    await env.renderer.flush()
+    const tree = env.renderer.render(registration.component, props)
+    await env.renderer.flush()
+    return { ...env, tree, registration, props }
+  }
+
+  /** 在元素树里找第一个满足谓词的节点。 */
+  function findBy(node, predicate) {
+    if (node === null || node === undefined || typeof node !== 'object') return undefined
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = findBy(child, predicate)
+        if (hit !== undefined) return hit
+      }
+      return undefined
+    }
+    if (predicate(node)) return node
+    if (node.children !== undefined) {
+      for (const child of node.children) {
+        const hit = findBy(child, predicate)
+        if (hit !== undefined) return hit
+      }
+    }
+    return undefined
+  }
+
+  /** 从渲染结果里收集所有字符串。 */
+  function stringsOf(node, out = []) {
+    if (node === null || node === undefined || typeof node === 'boolean') return out
+    if (typeof node === 'string') {
+      out.push(node)
+      return out
+    }
+    if (Array.isArray(node)) {
+      for (const child of node) stringsOf(child, out)
+      return out
+    }
+    if (typeof node === 'object' && node.children !== undefined) stringsOf(node.children, out)
+    return out
+  }
+
+  it('宿主没开这个功能时不占那一格', async () => {
+    const env = browserEnv()
+    const { tree } = await renderBell({
+      locale: ZH_LOCALE,
+      fetch: notifyFetch({ state: { notifyAvailable: false } }),
+      window: env.window,
+    })
+    assert.equal(tree, null)
+  })
+
+  it('浏览器不支持通知时也不占那一格（否则点一下只能得到一句骂）', async () => {
+    const { tree } = await renderBell({ locale: ZH_LOCALE, fetch: notifyFetch() })
+    assert.equal(tree, null)
+  })
+
+  it('支持的时候是一个带状态的按钮：关着', async () => {
+    const env = browserEnv()
+    const { tree } = await renderBell({ locale: ZH_LOCALE, fetch: notifyFetch(), window: env.window })
+    assert.ok(tree !== null, '应当渲染出铃铛')
+    assert.equal(tree.type, 'button')
+    assert.equal(tree.props['aria-pressed'], false)
+    assert.equal(tree.props['data-dsh-tailscale-remote-notify'], 'off')
+    assert.match(tree.props.title, /关/)
+    // 关着的时候不该有任何后台轮询（否则每个页面都在白耗电）。
+    assert.equal(env.timers.entries.length, 0)
+  })
+
+  it('点一下：要权限、记本机、开始轮询、并立刻弹一条确认', async () => {
+    const env = browserEnv()
+    const { tree, renderer, registration, props, calls } = await renderBell({
+      locale: ZH_LOCALE,
+      fetch: notifyFetch(),
+      window: env.window,
+    })
+
+    tree.props.onClick()
+    await renderer.flush()
+
+    assert.equal(env.storage.map.get(DEVICE_KEY), '1', '本机选择要落到 localStorage')
+    assert.equal(env.timers.entries.length, 1, '开启后必须有且只有一个轮询定时器')
+    assert.equal(env.timers.entries[0].ms, 4000)
+    // 第一跳只对表，不带 since。
+    const feedCall = calls.find((call) => call.path.startsWith(FEED_ENDPOINT))
+    assert.ok(feedCall !== undefined)
+    assert.equal(feedCall.path.includes('since='), false, '第一次只对表，不许回放历史')
+    // 确认通知：点完什么反馈都没有会让人以为没点上。
+    assert.equal(env.notes.shown.length, 1)
+    assert.equal(env.notes.shown[0].title, '状态通知已开启')
+
+    const next = renderer.render(registration.component, props)
+    await renderer.flush()
+    assert.equal(next.props['data-dsh-tailscale-remote-notify'], 'on')
+  })
+
+  it('浏览器拒了权限：不开启、不轮询、并明确告诉用户', async () => {
+    const alerts = []
+    const env = browserEnv({ permission: 'denied', alerts })
+    const { tree, renderer, calls } = await renderBell({
+      locale: ZH_LOCALE,
+      fetch: notifyFetch(),
+      window: env.window,
+    })
+
+    tree.props.onClick()
+    await renderer.flush()
+
+    assert.equal(env.storage.map.has(DEVICE_KEY), false)
+    assert.equal(env.timers.entries.length, 0)
+    assert.equal(env.notes.shown.length, 0)
+    assert.equal(calls.some((call) => call.path.startsWith(FEED_ENDPOINT)), false)
+    assert.equal(alerts.length, 1)
+    assert.match(alerts[0], /通知权限/)
+  })
+
+  it('收到事件时按类别弹通知（🟢 / 🟡 / 🔴），正文带会话标题', async () => {
+    const events = [
+      { seq: 8, kind: 'done', sessionId: 's1', sessionTitle: '修登录 bug' },
+      { seq: 9, kind: 'question', sessionId: 's1', sessionTitle: '修登录 bug', detail: 'bash' },
+      { seq: 10, kind: 'error', sessionId: 's2', sessionTitle: '迁移数据库', detail: 'connection reset' },
+    ]
+    const env = browserEnv()
+    // 本机已开启：走进真实路径 —— 挂载 effect 自己把轮询拉起来。
+    env.storage.setItem(DEVICE_KEY, '1')
+    // 第一跳给游标与空事件，第二跳才给真事件 —— 与真实宿主一致。
+    let round = 0
+    const feed = () => {
+      round += 1
+      return round === 1 ? { notify: true, cursor: 7, events: [] } : { notify: true, cursor: 10, events }
+    }
+    const { renderer } = await renderBell({ locale: ZH_LOCALE, fetch: notifyFetch({ feed }), window: env.window })
+    await renderer.flush()
+
+    assert.equal(env.timers.entries.length, 1, '本机已开启 + 权限在 → 应该已经开轮询')
+    // 手动触发一次轮询回调：拿到 3 条事件。
+    await env.timers.entries[0].fn()
+    await renderer.flush()
+
+    assert.equal(env.notes.shown.length, 3, `实际 ${env.notes.shown.length} 条`)
+    assert.deepEqual(
+      env.notes.shown.map((note) => note.title),
+      ['🟢 会话完成', '🟡 等待你的确认', '🔴 会话意外中断'],
+    )
+    assert.match(env.notes.shown[0].body, /修登录 bug/)
+    assert.match(env.notes.shown[1].body, /bash/)
+    assert.match(env.notes.shown[2].body, /connection reset/)
+  })
+
+  it('页面正被看着时不弹（那条消息本来就在眼前）', async () => {
+    const env = browserEnv({ document: { visibilityState: 'visible', hasFocus: () => true } })
+    env.storage.setItem(DEVICE_KEY, '1')
+    let round = 0
+    const feed = () => {
+      round += 1
+      return round === 1
+        ? { notify: true, cursor: 1, events: [] }
+        : { notify: true, cursor: 2, events: [{ seq: 2, kind: 'done', sessionId: 's1', sessionTitle: 'x' }] }
+    }
+    const { renderer } = await renderBell({
+      locale: ZH_LOCALE,
+      fetch: notifyFetch({ feed }),
+      window: env.window,
+      document: env.document,
+    })
+    await renderer.flush()
+
+    assert.equal(env.timers.entries.length, 1, '本机已开启 + 权限在 → 应该已经开轮询')
+    await env.timers.entries[0].fn()
+    await renderer.flush()
+    assert.equal(env.notes.shown.length, 0, '用户正看着页面，不该弹系统通知')
+  })
+
+  it('宿主总闸关着时收到的事件也不弹', async () => {
+    const env = browserEnv()
+    env.storage.setItem(DEVICE_KEY, '1')
+    let round = 0
+    const feed = () => {
+      round += 1
+      return round === 1
+        ? { notify: false, cursor: 1, events: [] }
+        : { notify: false, cursor: 2, events: [{ seq: 2, kind: 'done', sessionId: 's1' }] }
+    }
+    const { renderer } = await renderBell({ locale: ZH_LOCALE, fetch: notifyFetch({ feed }), window: env.window })
+    await renderer.flush()
+    await env.timers.entries[0].fn()
+    await renderer.flush()
+    assert.equal(env.notes.shown.length, 0)
+  })
+
+  it('设置页那一行里的总开关：点一下真的 POST，并跟着改文案', async () => {
+    const { tree, renderer, registration, props, calls } = await renderRow({
+      locale: ZH_LOCALE,
+      fetch: notifyFetch({ state: { notify: true } }),
+    })
+    const toggle = findBy(tree, (node) => node.type === 'button' && node.props.role === 'switch')
+    assert.ok(toggle !== undefined, '设置页里必须有那个总开关')
+    assert.equal(toggle.props['aria-checked'], true)
+    assert.equal(stringsOf(toggle).join(''), '已开启')
+
+    toggle.props.onClick()
+    await renderer.flush()
+
+    const posted = calls.find((call) => call.path === SWITCH_ENDPOINT)
+    assert.ok(posted !== undefined, '必须真的打到总开关端点')
+    assert.equal(posted.options.method, 'POST')
+    assert.deepEqual(JSON.parse(posted.options.body), { enabled: false })
+
+    const after = renderer.render(registration.component, props)
+    await renderer.flush()
+    const switched = findBy(after, (node) => node.type === 'button' && node.props.role === 'switch')
+    assert.equal(switched.props['aria-checked'], false)
+    assert.equal(stringsOf(switched).join(''), '已关闭')
+  })
+})
