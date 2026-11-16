@@ -1,6 +1,0 @@
-{
-  "repo": "Ckarefulon/dsh-providers-hub",
-  "ref": "master",
-  "command": "node -v && pnpm -v && echo '--- package ---' && node -e \"const p=require('./package.json');console.log(p.name, p.version)\"",
-  "maxWaitMs": 420000
-}
