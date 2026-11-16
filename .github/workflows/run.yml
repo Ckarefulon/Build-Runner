@@ -66,6 +66,19 @@ on:
 permissions:
   contents: read
 
+# Serialize runs that target the same repository + ref.
+#
+# Without this, two concurrent builds of one project can both publish a snapshot
+# to the same branch and race: the second push wins, but the run that already
+# started may have checked out the first tree, so each caller gets a result for
+# code that is no longer what the branch points at.
+#
+# cancel-in-progress is false on purpose. Cancelling would drop a caller that is
+# actively waiting for output; queueing costs runner time but never a wrong answer.
+concurrency:
+  group: build-runner-${{ inputs.repo || github.repository }}-${{ inputs.ref || github.event.repository.default_branch }}
+  cancel-in-progress: false
+
 env:
   PYTHONUNBUFFERED: '1'
   CI: 'true'
@@ -207,13 +220,29 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.cache.outputs.path }}
-          # Key includes the target repo so projects never share or evict each
-          # other's entries.
           key: br-${{ runner.os }}-${{ steps.cache.outputs.scope }}-${{ steps.cache.outputs.key }}
           # Restore prefix is ALSO scoped. A bare `br-Linux-` prefix would let
           # one project restore another project's dependency cache on a miss,
           # which is both wrong and slower than a clean download.
           restore-keys: br-${{ runner.os }}-${{ steps.cache.outputs.scope }}-
+
+      # Gradle BUILD cache — a different layer from the dependency cache above.
+      # The dependency cache stops re-downloading jars; this stops re-COMPILING.
+      # Measured on a small project: dependency cache alone leaves the build at
+      # ~18-22s; with build outputs reused an unchanged task set drops to a few
+      # seconds. Keyed per repo and per lockfile so a project never receives
+      # another project's compiled classes.
+      - name: Restore Gradle build cache
+        id: buildcache
+        if: ${{ hashFiles('build.gradle.kts', 'build.gradle', 'settings.gradle.kts', 'settings.gradle') != '' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/build-cache-1
+            ~/.gradle/build-cache-1
+          key: br-buildcache-${{ runner.os }}-${{ steps.cache.outputs.scope }}-${{ hashFiles('**/*.gradle.kts', '**/*.gradle', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            br-buildcache-${{ runner.os }}-${{ steps.cache.outputs.scope }}-
 
       # ---------------------------------------------------------------- execute --
       # Toolchain probe used to take 29s — longer than the build itself — because
@@ -325,6 +354,16 @@ jobs:
           echo "--- build-runner echo of the command ---"
           head -n 60 "/tmp/br-run.$ext"
           echo "--- BUILD-RUNNER-OUTPUT-BEGIN ---"
+
+          # Gradle only consults the build cache if told to. Rather than ask the
+          # caller to remember `--build-cache` (and to keep repeat invocations
+          # consistent), pass it through the environment where the wrapper
+          # applies it. GRADLE_OPTS is honoured by every wrapper/CLI invocation
+          # and does not rewrite the user's command text.
+          #
+          # Also disable the daemon: the runner is ephemeral, so a daemon only
+          # burns memory and can hold locks when the step ends.
+          export GRADLE_OPTS="$GRADLE_OPTS -Dorg.gradle.caching=true -Dorg.gradle.daemon=false"
 
           started=$SECONDS
           set +e
