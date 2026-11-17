@@ -96,6 +96,10 @@ on:
         description: 'Base64 patch of local changes, applied after checkout.'
         required: false
         default: ''
+      patch_ref:
+        description: 'Branch in THIS repo holding the workspace patch (used when too big for an input).'
+        required: false
+        default: ''
 
 permissions:
   # Needed to create the Release (and its asset) in the runner repository.
@@ -229,20 +233,39 @@ jobs:
 
       # Apply the caller's local changes without creating any branch in the
       # target repository. See run.yml for the rationale behind `-3`.
+      - name: Fetch workspace patch
+        if: ${{ inputs.patch_ref != '' }}
+        shell: bash
+        env:
+          IN_REF: ${{ inputs.patch_ref }}
+        run: |
+          set +e
+          set +o pipefail
+          url="https://raw.githubusercontent.com/${{ github.repository }}/${IN_REF}/.build-runner/workspace.patch"
+          echo "获取补丁：$url"
+          if curl -fsSL "$url" -o /tmp/br.patch; then
+            echo "补丁大小：$(wc -c < /tmp/br.patch | tr -d ' ') 字节"
+          else
+            echo "::error::无法获取补丁分支 ${IN_REF}"
+            exit 1
+          fi
+          exit 0
+
       - name: Apply workspace patch
-        if: ${{ inputs.workspace_patch != '' }}
+        if: ${{ inputs.patch_ref != '' || inputs.workspace_patch != '' }}
         shell: bash
         env:
           IN_PATCH: ${{ inputs.workspace_patch }}
         run: |
           set +e
           set +o pipefail
-          printf '%s' "$IN_PATCH" | base64 -d > /tmp/br.patch
+          if [ -n "$IN_PATCH" ]; then
+            printf '%s' "$IN_PATCH" | base64 -d > /tmp/br.patch
+          fi
           if [ ! -s /tmp/br.patch ]; then
             echo "补丁为空，跳过"
             exit 0
           fi
-          echo "补丁大小：$(wc -c < /tmp/br.patch | tr -d ' ') 字节"
           if git apply --binary --whitespace=nowarn /tmp/br.patch; then
             echo "::notice::已应用本地改动补丁"
           elif git apply --binary --whitespace=nowarn -3 /tmp/br.patch; then
@@ -545,3 +568,18 @@ jobs:
           echo "release_url=$REL_URL"
           echo "committed=$COMMITTED"
           echo "=================================================================="
+
+      # Disposable patch branch must not accumulate.
+      - name: Cleanup patch branch
+        if: ${{ always() && inputs.patch_ref != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.release_token || github.token }}
+          IN_REF: ${{ inputs.patch_ref }}
+        run: |
+          set +e
+          set +o pipefail
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${IN_REF}" >/dev/null 2>&1 \
+            && echo "已删除临时补丁分支 ${IN_REF}" \
+            || echo "临时分支删除失败（可忽略，下次会被覆盖）"
+          exit 0
