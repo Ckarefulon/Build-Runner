@@ -255,7 +255,7 @@ jobs:
       # keystore is reused across runs.
       - name: Restore Android debug keystore
         id: androidkey
-        if: ${{ hashFiles('**/AndroidManifest.xml', '**/build.gradle', '**/build.gradle.kts') != '' }}
+        if: ${{ true }}
         uses: actions/cache@v4
         with:
           path: ~/.android
@@ -264,7 +264,7 @@ jobs:
             br-android-debug-${{ runner.os }}-
 
       - name: Ensure debug keystore exists
-        if: ${{ hashFiles('**/AndroidManifest.xml', '**/build.gradle', '**/build.gradle.kts') != '' }}
+        if: ${{ true }}
         shell: bash
         run: |
           set +e
