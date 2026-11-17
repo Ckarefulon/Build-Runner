@@ -183,6 +183,50 @@ jobs:
           done
           exit 0
 
+      # Android's debug keystore is generated on first use with RANDOM keys, and
+      # every hosted runner starts blank. Each build therefore signs with a
+      # different key, and installing over a previous debug build fails with
+      # "signatures do not match" / INSTALL_FAILED_UPDATE_INCOMPATIBLE.
+      #
+      # The debug key itself is fine — the problem is that it kept changing. One
+      # stable keystore, restored from cache, makes repeated debug installs work.
+      # This lives in the release workflow too because packages are built here.
+      - name: Restore Android debug keystore
+        id: androidkey
+        if: ${{ hashFiles('**/AndroidManifest.xml', '**/build.gradle', '**/build.gradle.kts') != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.android
+          key: br-android-debug-${{ runner.os }}-${{ steps.t.outputs.repo }}
+
+      - name: Ensure debug keystore exists
+        if: ${{ hashFiles('**/AndroidManifest.xml', '**/build.gradle', '**/build.gradle.kts') != '' }}
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          mkdir -p "$HOME/.android"
+          if [ -f "$HOME/.android/debug.keystore" ]; then
+            echo "debug.keystore 已存在（来自缓存），签名保持一致"
+            if command -v keytool >/dev/null 2>&1; then
+              keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android 2>/dev/null \
+                | grep -iE "SHA1|SHA-256" | head -2
+            fi
+          else
+            if command -v keytool >/dev/null 2>&1; then
+              keytool -genkeypair -v \
+                -keystore "$HOME/.android/debug.keystore" \
+                -storepass android -keypass android -alias androiddebugkey \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1 \
+                && echo "已生成固定 debug.keystore" \
+                || echo "keytool 生成失败，交给 Gradle 自动生成"
+            else
+              echo "无 keytool，交给 Gradle 自动生成（随后会缓存）"
+            fi
+          fi
+          exit 0
+
       - name: Setup commands
         if: ${{ inputs.setup != '' }}
         shell: bash
