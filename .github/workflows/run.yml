@@ -498,17 +498,35 @@ jobs:
         run: |
           set +e
           set +o pipefail
-          # The patch lives on a disposable branch in THIS repo; fetch just that
-          # file rather than checking out the branch (the target checkout must
-          # stay pristine).
+          # The patch lives on a disposable branch in THIS repo; fetch only that
+          # file so the target checkout stays pristine.
           url="https://raw.githubusercontent.com/${{ github.repository }}/${IN_REF}/.build-runner/workspace.patch"
           echo "获取补丁：$url"
-          if curl -fsSL "$url" -o /tmp/br.patch; then
-            echo "补丁大小：$(wc -c < /tmp/br.patch | tr -d ' ') 字节"
-          else
+          if ! curl -fsSL "$url" -o /tmp/br.patch.raw; then
             echo "::error::无法获取补丁分支 ${IN_REF}"
             exit 1
           fi
+          echo "下载大小：$(wc -c < /tmp/br.patch.raw | tr -d ' ') 字节"
+
+          # Two transports can publish this file:
+          #   git-data -> raw patch bytes, starting with "diff --git"
+          #   contents -> base64 text
+          # Detect by content rather than by a flag, so the workflow stays correct
+          # even if the client switches transports mid-flight.
+          head -c 5 /tmp/br.patch.raw | grep -q '^diff ' && is_raw=1 || is_raw=0
+          if [ "$is_raw" = "1" ]; then
+            cp /tmp/br.patch.raw /tmp/br.patch
+            echo "补丁格式：原始 diff"
+          else
+            if base64 -d < /tmp/br.patch.raw > /tmp/br.patch 2>/dev/null; then
+              echo "补丁格式：base64（已解码）"
+            else
+              echo "::error::补丁既不是 diff 也不是 base64，无法识别"
+              head -c 200 /tmp/br.patch.raw
+              exit 1
+            fi
+          fi
+          echo "补丁大小：$(wc -c < /tmp/br.patch | tr -d ' ') 字节"
           exit 0
 
       - name: Apply workspace patch
