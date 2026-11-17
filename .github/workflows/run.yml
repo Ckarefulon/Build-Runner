@@ -63,7 +63,11 @@ on:
         required: false
         default: '1'
       workspace_patch:
-        description: 'Base64 patch of local changes, applied after checkout. Empty = build the ref as-is.'
+        description: 'Patch of local changes, applied after checkout. Empty = build the ref as-is.'
+        required: false
+        default: ''
+      patch_ref:
+        description: 'Branch in THIS repo holding the workspace patch (used when the patch is too big for an input).'
         required: false
         default: ''
 
@@ -394,20 +398,44 @@ jobs:
       # apply fails, but a three-way merge still lands the change. If both fail
       # we stop rather than build code that does not match what the caller has —
       # silently building different code is the worst outcome available here.
+      - name: Fetch workspace patch
+        if: ${{ inputs.patch_ref != '' }}
+        shell: bash
+        env:
+          IN_REF: ${{ inputs.patch_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          set +o pipefail
+          # The patch lives on a disposable branch in THIS repo; fetch just that
+          # file rather than checking out the branch (the target checkout must
+          # stay pristine).
+          url="https://raw.githubusercontent.com/${{ github.repository }}/${IN_REF}/.build-runner/workspace.patch"
+          echo "获取补丁：$url"
+          if curl -fsSL "$url" -o /tmp/br.patch; then
+            echo "补丁大小：$(wc -c < /tmp/br.patch | tr -d ' ') 字节"
+          else
+            echo "::error::无法获取补丁分支 ${IN_REF}"
+            exit 1
+          fi
+          exit 0
+
       - name: Apply workspace patch
-        if: ${{ inputs.workspace_patch != '' }}
+        if: ${{ inputs.patch_ref != '' || inputs.workspace_patch != '' }}
         shell: bash
         env:
           IN_PATCH: ${{ inputs.workspace_patch }}
         run: |
           set +e
           set +o pipefail
-          printf '%s' "$IN_PATCH" | base64 -d > /tmp/br.patch
+          # Small patches may arrive inline; larger ones come via patch_ref.
+          if [ -n "$IN_PATCH" ]; then
+            printf '%s' "$IN_PATCH" | base64 -d > /tmp/br.patch
+          fi
           if [ ! -s /tmp/br.patch ]; then
             echo "补丁为空，跳过"
             exit 0
           fi
-          echo "补丁大小：$(wc -c < /tmp/br.patch | tr -d ' ') 字节"
           if git apply --binary --whitespace=nowarn /tmp/br.patch; then
             echo "::notice::已应用本地改动补丁"
           elif git apply --binary --whitespace=nowarn -3 /tmp/br.patch; then
@@ -507,3 +535,19 @@ jobs:
           echo "command_outcome=$CMD_OUTCOME"
           echo "job_status=${{ job.status }}"
           echo "========================================================"
+
+      # The transient patch branch is disposable: remove it so the engine repo
+      # does not accumulate one branch per workspace build.
+      - name: Cleanup patch branch
+        if: ${{ always() && inputs.patch_ref != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.release_token || github.token }}
+          IN_REF: ${{ inputs.patch_ref }}
+        run: |
+          set +e
+          set +o pipefail
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${IN_REF}" >/dev/null 2>&1 \
+            && echo "已删除临时补丁分支 ${IN_REF}" \
+            || echo "临时分支删除失败（可忽略，下次会被覆盖）"
+          exit 0
