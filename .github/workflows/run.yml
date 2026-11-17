@@ -261,13 +261,29 @@ jobs:
       # The fix is not to use a different key — the debug key is fine — but to
       # stop it from being regenerated: cache ~/.android so one stable debug
       # keystore is reused across runs.
+      # Own step so the scope is always present: when `cache: none` the Detect
+      # caches step emits no scope, and the keystore cache key would collapse to
+      # a shared `br-android-debug-Linux-` that every project fights over.
+      - name: Compute cache scope
+        id: scope
+        shell: bash
+        env:
+          IN_REPO: ${{ steps.t.outputs.repo }}
+        run: |
+          set +e
+          set +o pipefail
+          s=$(printf '%s' "${IN_REPO:-this-repo}" | tr '/' '-' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)
+          echo "scope=$s" >> "$GITHUB_OUTPUT"
+          echo "cache scope: $s"
+          exit 0
+
       - name: Restore Android debug keystore
         id: androidkey
         if: ${{ true }}
         uses: actions/cache@v4
         with:
           path: ~/.android
-          key: br-android-debug-${{ runner.os }}-${{ steps.cache.outputs.scope }}
+          key: br-android-debug-${{ runner.os }}-${{ steps.scope.outputs.scope }}
           restore-keys: |
             br-android-debug-${{ runner.os }}-
 
@@ -536,18 +552,8 @@ jobs:
           echo "job_status=${{ job.status }}"
           echo "========================================================"
 
-      # The transient patch branch is disposable: remove it so the engine repo
-      # does not accumulate one branch per workspace build.
-      - name: Cleanup patch branch
-        if: ${{ always() && inputs.patch_ref != '' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.release_token || github.token }}
-          IN_REF: ${{ inputs.patch_ref }}
-        run: |
-          set +e
-          set +o pipefail
-          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${IN_REF}" >/dev/null 2>&1 \
-            && echo "已删除临时补丁分支 ${IN_REF}" \
-            || echo "临时分支删除失败（可忽略，下次会被覆盖）"
-          exit 0
+      # NOTE: the patch branch (br-patch/<owner-repo>) is intentionally NOT
+      # deleted here. It is reused and overwritten by the next build of the same
+      # target, and the concurrency group above serializes those builds — so a
+      # cleanup step would only buy an extra container step (~10s) to remove
+      # something the next run overwrites anyway.
