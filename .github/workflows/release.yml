@@ -193,14 +193,14 @@ jobs:
       # This lives in the release workflow too because packages are built here.
       - name: Restore Android debug keystore
         id: androidkey
-        if: ${{ hashFiles('**/AndroidManifest.xml', '**/build.gradle', '**/build.gradle.kts') != '' }}
+        if: ${{ true }}
         uses: actions/cache@v4
         with:
           path: ~/.android
           key: br-android-debug-${{ runner.os }}-${{ steps.t.outputs.repo }}
 
       - name: Ensure debug keystore exists
-        if: ${{ hashFiles('**/AndroidManifest.xml', '**/build.gradle', '**/build.gradle.kts') != '' }}
+        if: ${{ true }}
         shell: bash
         run: |
           set +e
