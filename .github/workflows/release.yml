@@ -272,13 +272,35 @@ jobs:
           echo "--- packaging ${#matched[@]} path(s) ---"
           printf '  %s\n' "${matched[@]:0:40}"
 
-          zipfile="${name}.zip"
-          rm -f "$zipfile"
-          if command -v zip >/dev/null 2>&1; then
-            zip -r -q "$zipfile" "${matched[@]}"
+          # A single artifact (the common case: one APK, one jar) is published
+          # AS-IS. Wrapping one file in a zip adds no value, and an APK inside a
+          # zip cannot be installed directly on a phone — every consumer has to
+          # unzip first. Only multiple paths / directories get archived.
+          zipfile=""
+          if [ "${#matched[@]}" -eq 1 ] && [ -f "${matched[0]}" ]; then
+            src="${matched[0]}"
+            base=$(basename "$src")
+            # Publish the single artifact under the caller's package name, but
+            # KEEP its extension: a phone must recognise `.apk`, and a release
+            # asset named `foo.zip` that is really an APK would be unusable.
+            ext="${base##*.}"
+            if [ "$ext" = "$base" ]; then ext="bin"; fi
+            case "$name" in
+              *".$ext") zipfile="$name" ;;
+              *)        zipfile="${name}.${ext}" ;;
+            esac
+            cp -f "$src" "./$zipfile"
+            echo "单文件产物：直接发布 $zipfile（不打包）"
           else
-            tar -czf "${name}.tar.gz" "${matched[@]}"
-            zipfile="${name}.tar.gz"
+            zipfile="${name}.zip"
+            rm -f "$zipfile"
+            if command -v zip >/dev/null 2>&1; then
+              zip -r -q "$zipfile" "${matched[@]}"
+            else
+              tar -czf "${name}.tar.gz" "${matched[@]}"
+              zipfile="${name}.tar.gz"
+            fi
+            echo "多路径产物：已归档 $zipfile"
           fi
 
           bytes=$(wc -c < "$zipfile" | tr -d ' ')
