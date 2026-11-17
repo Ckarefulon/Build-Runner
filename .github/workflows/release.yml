@@ -92,6 +92,10 @@ on:
         description: 'git fetch depth (0 = full history)'
         required: false
         default: '1'
+      workspace_patch:
+        description: 'Base64 patch of local changes, applied after checkout.'
+        required: false
+        default: ''
 
 permissions:
   # Needed to create the Release (and its asset) in the runner repository.
@@ -221,6 +225,34 @@ jobs:
               echo "无 keytool，交给 Gradle 自动生成（随后会缓存）"
             fi
           fi
+          exit 0
+
+      # Apply the caller's local changes without creating any branch in the
+      # target repository. See run.yml for the rationale behind `-3`.
+      - name: Apply workspace patch
+        if: ${{ inputs.workspace_patch != '' }}
+        shell: bash
+        env:
+          IN_PATCH: ${{ inputs.workspace_patch }}
+        run: |
+          set +e
+          set +o pipefail
+          printf '%s' "$IN_PATCH" | base64 -d > /tmp/br.patch
+          if [ ! -s /tmp/br.patch ]; then
+            echo "补丁为空，跳过"
+            exit 0
+          fi
+          echo "补丁大小：$(wc -c < /tmp/br.patch | tr -d ' ') 字节"
+          if git apply --binary --whitespace=nowarn /tmp/br.patch; then
+            echo "::notice::已应用本地改动补丁"
+          elif git apply --binary --whitespace=nowarn -3 /tmp/br.patch; then
+            echo "::notice::已用三方合并应用本地改动补丁"
+          else
+            echo "::error::补丁应用失败：云端代码与本地不一致，拒绝继续构建"
+            git apply --stat /tmp/br.patch | head -20
+            exit 1
+          fi
+          git status --porcelain | head -30
           exit 0
 
       - name: Setup commands
