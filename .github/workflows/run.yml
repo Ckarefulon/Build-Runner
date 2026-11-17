@@ -264,7 +264,7 @@ jobs:
             br-android-debug-${{ runner.os }}-
 
       - name: Ensure debug keystore exists
-        if: ${{ steps.androidkey.outcome == 'success' }}
+        if: ${{ hashFiles('**/AndroidManifest.xml', '**/build.gradle', '**/build.gradle.kts') != '' }}
         shell: bash
         run: |
           set +e
