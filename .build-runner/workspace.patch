@@ -268,13 +268,13 @@ index 1208f38..dbb437a 100644
 +LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 +OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 +SOFTWARE.
-diff --git a/PATCH_PROOF.txt b/PATCH_PROOF.txt
+diff --git a/LOCAL_ONLY.txt b/LOCAL_ONLY.txt
 new file mode 100644
-index 0000000..5e66ec1
+index 0000000..5924bb0
 --- /dev/null
-+++ b/PATCH_PROOF.txt
++++ b/LOCAL_ONLY.txt
 @@ -0,0 +1 @@
-+SECOND-RUN-CONTENT
++unpushed work
 diff --git a/README.md b/README.md
 index fefd4e9..b05a959 100644
 --- a/README.md
@@ -841,7 +841,7 @@ index fefd4e9..b05a959 100644
 +
 +MIT
 diff --git a/package.json b/package.json
-index f585917..572cdfe 100644
+index 7d95d75..dcde6e5 100644
 --- a/package.json
 +++ b/package.json
 @@ -1,49 +1,49 @@
@@ -870,7 +870,7 @@ index f585917..572cdfe 100644
 -  },
 -  "scripts": {
 -    "start": "node src/server.js",
--    "test": "node --test test/logs.test.js test/workspace.test.js test/ahead.test.js",
+-    "test": "node --test test/logs.test.js test/workspace.test.js test/ahead.test.js test/release.test.js",
 -    "smoke": "node tools/mcp-client.mjs list"
 -  },
 -  "keywords": [
@@ -919,7 +919,7 @@ index f585917..572cdfe 100644
 +  },
 +  "scripts": {
 +    "start": "node src/server.js",
-+    "test": "node --test test/logs.test.js test/workspace.test.js test/ahead.test.js",
++    "test": "node --test test/logs.test.js test/workspace.test.js test/ahead.test.js test/release.test.js",
 +    "smoke": "node tools/mcp-client.mjs list"
 +  },
 +  "keywords": [
@@ -2599,10 +2599,10 @@ index 5873444..84ee265 100644
 +  ].join('\n')
 +}
 diff --git a/src/release.js b/src/release.js
-index 5c455aa..d6998b1 100644
+index e9f2913..3e3ecb3 100644
 --- a/src/release.js
 +++ b/src/release.js
-@@ -1,281 +1,281 @@
+@@ -1,284 +1,284 @@
 -/**
 - * Package build outputs and publish them as a GitHub Release.
 - *
@@ -2768,7 +2768,10 @@ index 5c455aa..d6998b1 100644
 -  const receipt = {
 -    tag,
 -    repo: target.slug,
--    ref: effectiveRef,
+-    // The run checks out the caller's own ref and applies the patch on top, so
+-    // the effective ref IS target.ref. (A previous revision published a snapshot
+-    // branch and tracked it here; that variable is gone with the branch mode.)
+-    ref: target.ref,
 -    shell: normalizedShell,
 -    runner,
 -    artifactPaths: pathText,
@@ -3049,7 +3052,10 @@ index 5c455aa..d6998b1 100644
 +  const receipt = {
 +    tag,
 +    repo: target.slug,
-+    ref: effectiveRef,
++    // The run checks out the caller's own ref and applies the patch on top, so
++    // the effective ref IS target.ref. (A previous revision published a snapshot
++    // branch and tracked it here; that variable is gone with the branch mode.)
++    ref: target.ref,
 +    shell: normalizedShell,
 +    runner,
 +    artifactPaths: pathText,
@@ -3166,10 +3172,10 @@ index 5c455aa..d6998b1 100644
 +  }
 +}
 diff --git a/src/runner.js b/src/runner.js
-index 94ddbab..aba1c53 100644
+index 67b8310..8a1b5f0 100644
 --- a/src/runner.js
 +++ b/src/runner.js
-@@ -1,473 +1,473 @@
+@@ -1,505 +1,505 @@
 -/**
 - * Orchestration: dispatch a run, find it again, wait for it, fetch its output.
 - *
@@ -3312,6 +3318,9 @@ index 94ddbab..aba1c53 100644
 -    workspaceDir,
 -    workspaceMode = 'head',
 -    workspaceBranch,
+-    // Optional release in the same run: { artifactPaths?, packageName?,
+-    // releaseTag?, releaseTitle?, releaseNotes?, draft? }
+-    release,
 -  } = options
 -
 -  if (typeof command !== 'string' || command.trim() === '') {
@@ -3369,6 +3378,16 @@ index 94ddbab..aba1c53 100644
 -    ),
 -    workspace_patch: workspace?.patch ? workspace.patch.toString('base64') : '',
 -    patch_ref: workspace?.patchRef ?? '',
+-    // Optional release in the SAME job. Building twice (once to test, once to
+-    // package) doubles the wall clock for no benefit, and it also risks shipping
+-    // a different artifact than the one that was tested.
+-    publish_release: release ? 'true' : 'false',
+-    release_artifact_paths: release?.artifactPaths ?? '',
+-    package_name: release?.packageName ?? '',
+-    release_tag: release?.releaseTag ?? '',
+-    release_title: release?.releaseTitle ?? '',
+-    release_notes: release?.releaseNotes ?? '',
+-    release_draft: release?.draft ? 'true' : 'false',
 -    cache,
 -    artifact_paths: Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? ''),
 -  }
@@ -3387,6 +3406,7 @@ index 94ddbab..aba1c53 100644
 -    command,
 -    dispatchedAt: new Date(createdAt).toISOString(),
 -    workflow: `https://github.com/${engine.slug}/actions/workflows/${WORKFLOW_FILE}`,
+-    ...(release ? { release: true } : {}),
 -    ...(workspace
 -      ? {
 -          workspace: {
@@ -3542,6 +3562,24 @@ index 94ddbab..aba1c53 100644
 -    outputLines: parsed.lines ?? 0,
 -    failureHints: succeeded ? null : summarizeFailure(parsed.output),
 -    artifacts,
+-    // Present only when the run also published a release.
+-    ...(parsed.report.release_url
+-      ? {
+-          release: {
+-            tag: parsed.report.release_tag || null,
+-            url: parsed.report.release_url,
+-          },
+-        }
+-      : {}),
+-    ...(parsed.report.package_name
+-      ? {
+-          package: {
+-            name: parsed.report.package_name,
+-            bytes: Number(parsed.report.package_bytes ?? 0) || null,
+-            sha256: parsed.report.package_sha256 || null,
+-          },
+-        }
+-      : {}),
 -    // Outranks a plain head build: the caller must know the run used a snapshot
 -    // of uncommitted local changes, not a pushed commit.
 -    mode: receipt.workspace ? 'snapshot' : 'head',
@@ -3785,6 +3823,9 @@ index 94ddbab..aba1c53 100644
 +    workspaceDir,
 +    workspaceMode = 'head',
 +    workspaceBranch,
++    // Optional release in the same run: { artifactPaths?, packageName?,
++    // releaseTag?, releaseTitle?, releaseNotes?, draft? }
++    release,
 +  } = options
 +
 +  if (typeof command !== 'string' || command.trim() === '') {
@@ -3842,6 +3883,16 @@ index 94ddbab..aba1c53 100644
 +    ),
 +    workspace_patch: workspace?.patch ? workspace.patch.toString('base64') : '',
 +    patch_ref: workspace?.patchRef ?? '',
++    // Optional release in the SAME job. Building twice (once to test, once to
++    // package) doubles the wall clock for no benefit, and it also risks shipping
++    // a different artifact than the one that was tested.
++    publish_release: release ? 'true' : 'false',
++    release_artifact_paths: release?.artifactPaths ?? '',
++    package_name: release?.packageName ?? '',
++    release_tag: release?.releaseTag ?? '',
++    release_title: release?.releaseTitle ?? '',
++    release_notes: release?.releaseNotes ?? '',
++    release_draft: release?.draft ? 'true' : 'false',
 +    cache,
 +    artifact_paths: Array.isArray(artifactPaths) ? artifactPaths.join('\n') : String(artifactPaths ?? ''),
 +  }
@@ -3860,6 +3911,7 @@ index 94ddbab..aba1c53 100644
 +    command,
 +    dispatchedAt: new Date(createdAt).toISOString(),
 +    workflow: `https://github.com/${engine.slug}/actions/workflows/${WORKFLOW_FILE}`,
++    ...(release ? { release: true } : {}),
 +    ...(workspace
 +      ? {
 +          workspace: {
@@ -4015,6 +4067,24 @@ index 94ddbab..aba1c53 100644
 +    outputLines: parsed.lines ?? 0,
 +    failureHints: succeeded ? null : summarizeFailure(parsed.output),
 +    artifacts,
++    // Present only when the run also published a release.
++    ...(parsed.report.release_url
++      ? {
++          release: {
++            tag: parsed.report.release_tag || null,
++            url: parsed.report.release_url,
++          },
++        }
++      : {}),
++    ...(parsed.report.package_name
++      ? {
++          package: {
++            name: parsed.report.package_name,
++            bytes: Number(parsed.report.package_bytes ?? 0) || null,
++            sha256: parsed.report.package_sha256 || null,
++          },
++        }
++      : {}),
 +    // Outranks a plain head build: the caller must know the run used a snapshot
 +    // of uncommitted local changes, not a pushed commit.
 +    mode: receipt.workspace ? 'snapshot' : 'head',
@@ -4117,10 +4187,10 @@ index 94ddbab..aba1c53 100644
 +  return report
 +}
 diff --git a/src/server.js b/src/server.js
-index 60c4ef1..b7d1fc6 100644
+index eeaf140..b9e8f67 100644
 --- a/src/server.js
 +++ b/src/server.js
-@@ -1,620 +1,620 @@
+@@ -1,657 +1,657 @@
 -#!/usr/bin/env node
 -/**
 - * Build-Runner MCP server.
@@ -4227,12 +4297,25 @@ index 60c4ef1..b7d1fc6 100644
 -        workspaceDir: {
 -          type: 'string',
 -          description:
--            '本地 git 工作区目录。设置后进入「快照模式」：把该目录**未提交的改动**发布到目标仓库的专用构建分支后构建。' +
--            '只有改动的文件会上传（GitHub 侧的基线树由 base_tree 拼接），所以仓库再大也不慢。',
+-            '本地 git 工作区目录。设置后进入「快照模式」：把该目录**未提交的改动和未推送的提交**做成补丁，' +
+-            '云端签出你自己的分支后应用补丁再构建。目标仓库不会多出任何分支。',
 -        },
--        workspaceBranch: {
--          type: 'string',
--          description: '快照构建分支名，默认 build-runner。同一仓库复用，不污染日常分支。',
+-        release: {
+-          type: 'object',
+-          description:
+-            '在同一 job 内追加打包发版：命令成功后直接打包并发布 Release，**不需要再跑一次构建**。' +
+-            '既省掉一次完整编译，也保证发出去的包就是刚刚验证过的那个。',
+-          properties: {
+-            artifactPaths: {
+-              type: 'string',
+-              description: '要打包的路径（逗号/换行分隔）。不填则用 run 的 artifactPaths。',
+-            },
+-            packageName: { type: 'string', description: '包名（不含扩展名）' },
+-            releaseTag: { type: 'string', description: 'Release tag，默认同包名' },
+-            releaseTitle: { type: 'string', description: 'Release 标题' },
+-            releaseNotes: { type: 'string', description: '附加说明' },
+-            draft: { type: 'boolean', description: '是否发成草稿，默认 false' },
+-          },
 -        },
 -      },
 -      required: ['repo', 'command'],
@@ -4396,6 +4479,7 @@ index 60c4ef1..b7d1fc6 100644
 -        maxOutputChars: args.maxOutputChars,
 -        workspaceDir: args.workspaceDir,
 -        workspaceBranch: args.workspaceBranch,
+-        release: args.release,
 -      })
 -    }
 -    case 'prepare_workspace': {
@@ -4612,6 +4696,17 @@ index 60c4ef1..b7d1fc6 100644
 -      lines.push('----- 产物 -----')
 -      for (const item of value.artifacts) lines.push(`${item.name} (${item.sizeBytes} B)`)
 -    }
+-    // Released artifacts, when the run also published.
+-    if (value.package) {
+-      lines.push('')
+-      lines.push('----- 发布包 -----')
+-      const size = value.package.bytes ? `${(value.package.bytes / 1024).toFixed(1)} KiB` : '?'
+-      lines.push(`${value.package.name}  ${size}`)
+-      if (value.package.sha256) lines.push(`SHA256 ${value.package.sha256}`)
+-    }
+-    if (value.release) {
+-      lines.push(`Release ${value.release.tag ?? ''} ${value.release.url ?? ''}`)
+-    }
 -    if (value.note) {
 -      lines.push('')
 -      lines.push(value.note)
@@ -4678,7 +4773,19 @@ index 60c4ef1..b7d1fc6 100644
 -        // A tool failure is a normal result with isError, not a protocol error:
 -        // the AI must see the message and be able to retry.
 -        return reply(id, {
--          content: [{ type: 'text', text: `build-runner 执行失败：${error.message}` }],
+-          content: [
+-            {
+-              type: 'text',
+-              // Include the stack: a bare message ("effectiveRef is not defined")
+-              // says nothing about which call site broke, and this server runs as
+-              // a child process where the caller cannot attach a debugger.
+-              text:
+-                `build-runner 执行失败：${error.message}` +
+-                (error.stack
+-                  ? `\n\n----- stack -----\n${String(error.stack).split('\n').slice(1, 12).join('\n')}`
+-                  : ''),
+-            },
+-          ],
 -          isError: true,
 -        })
 -      }
@@ -4847,12 +4954,25 @@ index 60c4ef1..b7d1fc6 100644
 +        workspaceDir: {
 +          type: 'string',
 +          description:
-+            '本地 git 工作区目录。设置后进入「快照模式」：把该目录**未提交的改动**发布到目标仓库的专用构建分支后构建。' +
-+            '只有改动的文件会上传（GitHub 侧的基线树由 base_tree 拼接），所以仓库再大也不慢。',
++            '本地 git 工作区目录。设置后进入「快照模式」：把该目录**未提交的改动和未推送的提交**做成补丁，' +
++            '云端签出你自己的分支后应用补丁再构建。目标仓库不会多出任何分支。',
 +        },
-+        workspaceBranch: {
-+          type: 'string',
-+          description: '快照构建分支名，默认 build-runner。同一仓库复用，不污染日常分支。',
++        release: {
++          type: 'object',
++          description:
++            '在同一 job 内追加打包发版：命令成功后直接打包并发布 Release，**不需要再跑一次构建**。' +
++            '既省掉一次完整编译，也保证发出去的包就是刚刚验证过的那个。',
++          properties: {
++            artifactPaths: {
++              type: 'string',
++              description: '要打包的路径（逗号/换行分隔）。不填则用 run 的 artifactPaths。',
++            },
++            packageName: { type: 'string', description: '包名（不含扩展名）' },
++            releaseTag: { type: 'string', description: 'Release tag，默认同包名' },
++            releaseTitle: { type: 'string', description: 'Release 标题' },
++            releaseNotes: { type: 'string', description: '附加说明' },
++            draft: { type: 'boolean', description: '是否发成草稿，默认 false' },
++          },
 +        },
 +      },
 +      required: ['repo', 'command'],
@@ -5016,6 +5136,7 @@ index 60c4ef1..b7d1fc6 100644
 +        maxOutputChars: args.maxOutputChars,
 +        workspaceDir: args.workspaceDir,
 +        workspaceBranch: args.workspaceBranch,
++        release: args.release,
 +      })
 +    }
 +    case 'prepare_workspace': {
@@ -5232,6 +5353,17 @@ index 60c4ef1..b7d1fc6 100644
 +      lines.push('----- 产物 -----')
 +      for (const item of value.artifacts) lines.push(`${item.name} (${item.sizeBytes} B)`)
 +    }
++    // Released artifacts, when the run also published.
++    if (value.package) {
++      lines.push('')
++      lines.push('----- 发布包 -----')
++      const size = value.package.bytes ? `${(value.package.bytes / 1024).toFixed(1)} KiB` : '?'
++      lines.push(`${value.package.name}  ${size}`)
++      if (value.package.sha256) lines.push(`SHA256 ${value.package.sha256}`)
++    }
++    if (value.release) {
++      lines.push(`Release ${value.release.tag ?? ''} ${value.release.url ?? ''}`)
++    }
 +    if (value.note) {
 +      lines.push('')
 +      lines.push(value.note)
@@ -5298,7 +5430,19 @@ index 60c4ef1..b7d1fc6 100644
 +        // A tool failure is a normal result with isError, not a protocol error:
 +        // the AI must see the message and be able to retry.
 +        return reply(id, {
-+          content: [{ type: 'text', text: `build-runner 执行失败：${error.message}` }],
++          content: [
++            {
++              type: 'text',
++              // Include the stack: a bare message ("effectiveRef is not defined")
++              // says nothing about which call site broke, and this server runs as
++              // a child process where the caller cannot attach a debugger.
++              text:
++                `build-runner 执行失败：${error.message}` +
++                (error.stack
++                  ? `\n\n----- stack -----\n${String(error.stack).split('\n').slice(1, 12).join('\n')}`
++                  : ''),
++            },
++          ],
 +          isError: true,
 +        })
 +      }
@@ -5362,10 +5506,10 @@ index 60c4ef1..b7d1fc6 100644
 +
 +main()
 diff --git a/src/snapshot.js b/src/snapshot.js
-index c6e4e39..b05bc78 100644
+index 6989375..3bac8da 100644
 --- a/src/snapshot.js
 +++ b/src/snapshot.js
-@@ -1,166 +1,166 @@
+@@ -1,175 +1,175 @@
 -/**
 - * Workspace support: carry local changes to the cloud WITHOUT touching the
 - * target repository.
@@ -5474,13 +5618,22 @@ index c6e4e39..b05bc78 100644
 -  }
 -
 -  // Decide the transport: a small patch can ride in the dispatch input, but a
--  // realistic one exceeds the ~61 KiB limit, so it goes to a disposable branch
--  // in the ENGINE repo (never the target repo).
+-  // realistic one exceeds the ~61 KiB limit, so it goes to a dedicated branch in
+-  // the ENGINE repo (never the target repo).
 -  if (patch.length <= INLINE_PATCH_LIMIT || !engine) {
 -    return { ...result, patch, patchRef: null, patchInline: true }
 -  }
 -
--  const branch = `br-patch/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+-  // One FIXED branch per target repository, overwritten every run.
+-  //
+-  // Deliberately not a unique-per-run name: a fresh branch each time means the
+-  // engine repo accumulates refs forever and forces a cleanup step at the end of
+-  // every job (an extra container step, ~10s, to delete something nobody looks
+-  // at). Reusing one branch per target keeps concurrency safe — the workflow's
+-  // concurrency group is keyed on repo+ref, so two builds of the same target can
+-  // never race on it — while leaving no garbage behind.
+-  const scope = `${target.owner}-${target.repo}`.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60)
+-  const branch = `br-patch/${scope}`
 -  await publishPatchToEngine(client, {
 -    owner: engine.owner,
 -    repo: engine.repo,
@@ -5640,13 +5793,22 @@ index c6e4e39..b05bc78 100644
 +  }
 +
 +  // Decide the transport: a small patch can ride in the dispatch input, but a
-+  // realistic one exceeds the ~61 KiB limit, so it goes to a disposable branch
-+  // in the ENGINE repo (never the target repo).
++  // realistic one exceeds the ~61 KiB limit, so it goes to a dedicated branch in
++  // the ENGINE repo (never the target repo).
 +  if (patch.length <= INLINE_PATCH_LIMIT || !engine) {
 +    return { ...result, patch, patchRef: null, patchInline: true }
 +  }
 +
-+  const branch = `br-patch/${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
++  // One FIXED branch per target repository, overwritten every run.
++  //
++  // Deliberately not a unique-per-run name: a fresh branch each time means the
++  // engine repo accumulates refs forever and forces a cleanup step at the end of
++  // every job (an extra container step, ~10s, to delete something nobody looks
++  // at). Reusing one branch per target keeps concurrency safe — the workflow's
++  // concurrency group is keyed on repo+ref, so two builds of the same target can
++  // never race on it — while leaving no garbage behind.
++  const scope = `${target.owner}-${target.repo}`.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 60)
++  const branch = `br-patch/${scope}`
 +  await publishPatchToEngine(client, {
 +    owner: engine.owner,
 +    repo: engine.repo,
@@ -7028,6 +7190,179 @@ index 7d25ef7..ee84256 100644
 +  assert.equal(
 +    planPackage({ name: 'x', suffix: '', matched: ['app-1.2.3.apk'] }).file,
 +    'x.apk'
++  )
++})
+diff --git a/test/release.test.js b/test/release.test.js
+index 8326ce2..e9efd80 100644
+--- a/test/release.test.js
++++ b/test/release.test.js
+@@ -1,84 +1,84 @@
+-/**
+- * Regression tests for the release path.
+- *
+- * The bug being locked down: `release.js` referenced `effectiveRef`, a variable
+- * removed when snapshot publishing switched from branches to patches. Every
+- * call with `workspaceDir` crashed with a ReferenceError BEFORE dispatching, so
+- * no run existed and no release was produced — and the error surfaced as a bare
+- * message with no location.
+- *
+- * Two things are asserted here:
+- *   1. the module has no references to undeclared identifiers on the release
+- *      path (a static check, because the crash was a plain JS typo);
+- *   2. the dispatch inputs carry the caller's ref and the patch, which is the
+- *      behaviour the fix restores.
+- */
+-import { test } from 'node:test'
+-import assert from 'node:assert/strict'
+-import { readFileSync } from 'node:fs'
+-import { join, dirname } from 'node:path'
+-import { fileURLToPath } from 'node:url'
+-
+-const __dirname = dirname(fileURLToPath(import.meta.url))
+-const SRC = join(__dirname, '..', 'src')
+-
+-test('release.js does not reference the removed snapshot-branch variable', () => {
+-  const source = readFileSync(join(SRC, 'release.js'), 'utf8')
+-  // `effectiveRef` belonged to branch mode. Its return means a half-applied
+-  // refactor, and it crashes every workspace call at runtime.
+-  assert.equal(
+-    /\beffectiveRef\b/.test(source),
+-    false,
+-    'effectiveRef must not appear in release.js (patch mode uses target.ref)'
+-  )
+-})
+-
+-test('runner.js does not reference the removed snapshot-branch variable', () => {
+-  const source = readFileSync(join(SRC, 'runner.js'), 'utf8')
+-  assert.equal(/\beffectiveRef\b/.test(source), false, 'effectiveRef must not appear in runner.js')
+-})
+-
+-test('workspace mode reaches dispatch instead of crashing on a typo', async () => {
+-  const { releaseArtifacts } = await import('../src/release.js')
+-  const { execFileSync } = await import('node:child_process')
+-  assert.equal(typeof releaseArtifacts, 'function')
+-
+-  // Use the repo's real HEAD so the patch builder has a base it can actually
+-  // diff against — a fake SHA would fail earlier, on a legitimate guard.
+-  const repoDir = join(__dirname, '..')
+-  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+-    cwd: repoDir,
+-    encoding: 'utf8',
+-  }).trim()
+-
+-  // The regression: a workspace call used to throw a ReferenceError before any
+-  // network call. Reaching the dispatch stub proves the release path now runs to
+-  // the point where a real run would be created.
+-  const stubClient = {
+-    getBranch: async () => ({ name: 'dev' }),
+-    getRepo: async () => ({ default_branch: 'dev' }),
+-    resolveCommit: async () => ({ sha: head, tree: { sha: 'b'.repeat(40) } }),
+-    dispatch: async () => {
+-      throw new Error('STUB_DISPATCH_REACHED')
+-    },
+-  }
+-  await assert.rejects(
+-    () =>
+-      releaseArtifacts(stubClient, {
+-        repo: 'owner/repo',
+-        ref: 'dev',
+-        command: 'echo hi',
+-        artifactPaths: 'out/**',
+-        workspaceDir: repoDir,
+-        wait: false,
+-      }),
+-    error => {
+-      assert.match(
+-        error.message,
+-        /STUB_DISPATCH_REACHED/,
+-        `expected the dispatch to be reached, got: ${error.message}`
+-      )
+-      return true
+-    }
+-  )
+-})
++/**
++ * Regression tests for the release path.
++ *
++ * The bug being locked down: `release.js` referenced `effectiveRef`, a variable
++ * removed when snapshot publishing switched from branches to patches. Every
++ * call with `workspaceDir` crashed with a ReferenceError BEFORE dispatching, so
++ * no run existed and no release was produced — and the error surfaced as a bare
++ * message with no location.
++ *
++ * Two things are asserted here:
++ *   1. the module has no references to undeclared identifiers on the release
++ *      path (a static check, because the crash was a plain JS typo);
++ *   2. the dispatch inputs carry the caller's ref and the patch, which is the
++ *      behaviour the fix restores.
++ */
++import { test } from 'node:test'
++import assert from 'node:assert/strict'
++import { readFileSync } from 'node:fs'
++import { join, dirname } from 'node:path'
++import { fileURLToPath } from 'node:url'
++
++const __dirname = dirname(fileURLToPath(import.meta.url))
++const SRC = join(__dirname, '..', 'src')
++
++test('release.js does not reference the removed snapshot-branch variable', () => {
++  const source = readFileSync(join(SRC, 'release.js'), 'utf8')
++  // `effectiveRef` belonged to branch mode. Its return means a half-applied
++  // refactor, and it crashes every workspace call at runtime.
++  assert.equal(
++    /\beffectiveRef\b/.test(source),
++    false,
++    'effectiveRef must not appear in release.js (patch mode uses target.ref)'
++  )
++})
++
++test('runner.js does not reference the removed snapshot-branch variable', () => {
++  const source = readFileSync(join(SRC, 'runner.js'), 'utf8')
++  assert.equal(/\beffectiveRef\b/.test(source), false, 'effectiveRef must not appear in runner.js')
++})
++
++test('workspace mode reaches dispatch instead of crashing on a typo', async () => {
++  const { releaseArtifacts } = await import('../src/release.js')
++  const { execFileSync } = await import('node:child_process')
++  assert.equal(typeof releaseArtifacts, 'function')
++
++  // Use the repo's real HEAD so the patch builder has a base it can actually
++  // diff against — a fake SHA would fail earlier, on a legitimate guard.
++  const repoDir = join(__dirname, '..')
++  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
++    cwd: repoDir,
++    encoding: 'utf8',
++  }).trim()
++
++  // The regression: a workspace call used to throw a ReferenceError before any
++  // network call. Reaching the dispatch stub proves the release path now runs to
++  // the point where a real run would be created.
++  const stubClient = {
++    getBranch: async () => ({ name: 'dev' }),
++    getRepo: async () => ({ default_branch: 'dev' }),
++    resolveCommit: async () => ({ sha: head, tree: { sha: 'b'.repeat(40) } }),
++    dispatch: async () => {
++      throw new Error('STUB_DISPATCH_REACHED')
++    },
++  }
++  await assert.rejects(
++    () =>
++      releaseArtifacts(stubClient, {
++        repo: 'owner/repo',
++        ref: 'dev',
++        command: 'echo hi',
++        artifactPaths: 'out/**',
++        workspaceDir: repoDir,
++        wait: false,
++      }),
++    error => {
++      assert.match(
++        error.message,
++        /STUB_DISPATCH_REACHED/,
++        `expected the dispatch to be reached, got: ${error.message}`
++      )
++      return true
++    }
 +  )
 +})
 diff --git a/test/workspace.test.js b/test/workspace.test.js
