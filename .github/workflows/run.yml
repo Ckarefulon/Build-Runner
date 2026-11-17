@@ -70,9 +70,48 @@ on:
         description: 'Branch in THIS repo holding the workspace patch (used when the patch is too big for an input).'
         required: false
         default: ''
+      # ---------------------------------------------------------------------
+      # Optional release, in THIS job.
+      #
+      # Running `run` and then `release` as two workflow runs builds twice — the
+      # same 350s compile, two cold environments. Doing it here means one build,
+      # and the artifact that is tested is byte-for-byte the artifact that ships.
+      # ---------------------------------------------------------------------
+      publish_release:
+        description: 'true = after the command succeeds, package and publish a Release in this job.'
+        required: false
+        default: 'false'
+      release_artifact_paths:
+        description: 'Paths to package for the release (defaults to artifact_paths).'
+        required: false
+        default: ''
+      package_name:
+        description: 'Release package name (without extension).'
+        required: false
+        default: ''
+      release_tag:
+        description: 'Release tag. Default: package name.'
+        required: false
+        default: ''
+      release_title:
+        description: 'Release title.'
+        required: false
+        default: ''
+      release_notes:
+        description: 'Extra release notes.'
+        required: false
+        default: ''
+      release_draft:
+        description: 'true = create the release as a draft.'
+        required: false
+        default: 'false'
 
 permissions:
-  contents: read
+  # `write` is required to create a Release when publish_release is on. It cannot
+  # be conditional, so any caller can write releases to THIS repo — acceptable
+  # because the only parties who can dispatch this workflow already have write
+  # access here. The target repository is still only ever read.
+  contents: write
 
 # Serialize runs that target the same repository + ref.
 #
@@ -569,6 +608,133 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # ------------------------------------------------------------------ release --
+      # Package and publish in the SAME job, so the artifact being shipped is the
+      # one that was just built and tested — not a second build of the same code.
+      - name: Package for release
+        id: pkg
+        if: ${{ success() && inputs.publish_release == 'true' }}
+        shell: bash
+        env:
+          IN_PATHS: ${{ inputs.release_artifact_paths != '' && inputs.release_artifact_paths || inputs.artifact_paths }}
+          IN_NAME: ${{ inputs.package_name }}
+          REPO_SLUG: ${{ steps.t.outputs.repo }}
+          SHORT_SHA: ${{ steps.rev.outputs.short }}
+        run: |
+          set -uo pipefail
+          slug_safe() { printf '%s' "$1" | tr '/' '-' | tr -cd 'A-Za-z0-9._-'; }
+
+          name="${IN_NAME:-$(slug_safe "$REPO_SLUG")-${SHORT_SHA}}"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+          mapfile -t paths < <(printf '%s\n' "$IN_PATHS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$')
+          matched=()
+          for p in "${paths[@]}"; do
+            # shellcheck disable=SC2206
+            found=( $p )
+            for f in "${found[@]}"; do
+              [ -e "$f" ] && matched+=("$f")
+            done
+          done
+          if [ "${#matched[@]}" -eq 0 ]; then
+            echo "::error::release_artifact_paths 没有匹配到任何文件：$IN_PATHS"
+            exit 1
+          fi
+          echo "--- packaging ${#matched[@]} path(s) ---"
+          printf '  %s\n' "${matched[@]:0:40}"
+
+          # A single file (one APK, one jar) ships as-is: wrapping it in a zip
+          # makes an APK uninstallable and adds nothing.
+          zipfile=""
+          if [ "${#matched[@]}" -eq 1 ] && [ -f "${matched[0]}" ]; then
+            src="${matched[0]}"
+            base=$(basename "$src")
+            if [ "$base" = "${base##*.}" ]; then ext="bin"; else ext="${base##*.}"; fi
+            case "$name" in
+              *".$ext") zipfile="$name" ;;
+              *)        zipfile="${name}.${ext}" ;;
+            esac
+            cp -f "$src" "./$zipfile"
+            echo "单文件产物：直接发布 $zipfile（不打包）"
+          else
+            zipfile="${name}.zip"
+            rm -f "$zipfile"
+            if command -v zip >/dev/null 2>&1; then
+              zip -r -q "$zipfile" "${matched[@]}"
+            else
+              tar -czf "${name}.tar.gz" "${matched[@]}"
+              zipfile="${name}.tar.gz"
+            fi
+            echo "多路径产物：已归档 $zipfile"
+          fi
+
+          bytes=$(wc -c < "$zipfile" | tr -d ' ')
+          if command -v sha256sum >/dev/null 2>&1; then
+            sum=$(sha256sum "$zipfile" | cut -d' ' -f1)
+          else
+            sum=$(shasum -a 256 "$zipfile" | cut -d' ' -f1)
+          fi
+          echo "file=$zipfile" >> "$GITHUB_OUTPUT"
+          echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sum" >> "$GITHUB_OUTPUT"
+          echo "Package $zipfile ($bytes bytes)"
+
+      - name: Publish release
+        id: rel
+        if: ${{ success() && inputs.publish_release == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.release_token || github.token }}
+          PKG_FILE: ${{ steps.pkg.outputs.file }}
+          PKG_NAME: ${{ steps.pkg.outputs.name }}
+          IN_TAG: ${{ inputs.release_tag }}
+          TITLE: ${{ inputs.release_title }}
+          NOTES: ${{ inputs.release_notes }}
+          DRAFT: ${{ inputs.release_draft }}
+          TARGET_REPO: ${{ steps.t.outputs.repo }}
+          TARGET_REF: ${{ steps.t.outputs.ref }}
+          TARGET_SHA: ${{ steps.rev.outputs.sha }}
+          SHA256: ${{ steps.pkg.outputs.sha256 }}
+        run: |
+          set -uo pipefail
+          tag="${IN_TAG:-$PKG_NAME}"
+          title="${TITLE:-$PKG_NAME}"
+          body=$(cat <<EOF
+          产物包（构建与打包在同一次运行内完成）
+
+          - 源仓库：\`${TARGET_REPO}\`
+          - 源版本：\`${TARGET_REF}\` @ \`${TARGET_SHA}\`
+          - SHA256：\`${SHA256}\`
+          EOF
+          )
+          if [ -n "${NOTES:-}" ]; then body="${body}
+
+          ---
+
+          ${NOTES}"; fi
+
+          args=(release create "$tag" "$PKG_FILE" --repo "${{ github.repository }}" --title "$title" --notes "$body")
+          if [ "${DRAFT:-false}" = "true" ]; then args+=(--draft); fi
+
+          if out=$(gh "${args[@]}" 2>&1); then
+            echo "Release 已发布：$out"
+            echo "url=$out" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "$out"
+            # Re-running the same tag must not fail the job: replace the asset.
+            if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "tag 已存在，覆盖资产"
+              gh release upload "$tag" "$PKG_FILE" --repo "${{ github.repository }}" --clobber
+              url=$(gh release view "$tag" --repo "${{ github.repository }}" --json url --jq .url)
+              echo "url=$url" >> "$GITHUB_OUTPUT"
+              echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Release 发布失败：$out"
+              exit 1
+            fi
+          fi
+
       # Always runs, so a caller can tell "the command failed" apart from
       # "the job died before the command ever started".
       - name: Report
@@ -579,6 +745,11 @@ jobs:
           TARGET_REF: ${{ steps.t.outputs.ref }}
           TARGET_SHA: ${{ steps.rev.outputs.short }}
           CMD_OUTCOME: ${{ steps.run.outcome }}
+          REL_TAG: ${{ steps.rel.outputs.tag }}
+          REL_URL: ${{ steps.rel.outputs.url }}
+          PKG_NAME: ${{ steps.pkg.outputs.name }}
+          PKG_BYTES: ${{ steps.pkg.outputs.bytes }}
+          PKG_SHA: ${{ steps.pkg.outputs.sha256 }}
         run: |
           echo "================ BUILD-RUNNER-REPORT-V1 ================"
           echo "repo=$TARGET_REPO"
@@ -586,6 +757,13 @@ jobs:
           echo "sha=$TARGET_SHA"
           echo "command_outcome=$CMD_OUTCOME"
           echo "job_status=${{ job.status }}"
+          # Present only when publish_release was on; the client uses these to
+          # surface the release without a second API round trip.
+          echo "release_tag=$REL_TAG"
+          echo "release_url=$REL_URL"
+          echo "package_name=$PKG_NAME"
+          echo "package_bytes=$PKG_BYTES"
+          echo "package_sha256=$PKG_SHA"
           echo "========================================================"
 
       # NOTE: the patch branch (br-patch/<owner-repo>) is intentionally NOT
