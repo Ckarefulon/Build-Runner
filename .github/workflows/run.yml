@@ -417,8 +417,63 @@ jobs:
           # burns memory and can hold locks when the step ends.
           export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.caching=true -Dorg.gradle.daemon=false"
 
+          # ---------------------------------------------------------------
+          # `-PdebugSuffix` auto-injection.
+          #
+          # A `debug` build here defaults to the SAME applicationId as the
+          # release build (com.xjtu.toolbox), so installing it over an existing
+          # release is a legitimate conflict: the CI debug key differs from the
+          # release key, so Android rejects the update. The project already
+          # solves this with `-PdebugSuffix`, which appends `.debug` to the
+          # applicationId so the two coexist — but a caller has to remember it,
+          # and forgetting it is exactly how a "cannot install" report happens.
+          #
+          # Detect both conditions and add the flag automatically:
+          #   1. the command builds a debug variant, and
+          #   2. the project actually honours debugSuffix (so we never pass an
+          #      unknown property to an unrelated project).
+          # BR_NO_DEBUG_SUFFIX=1 disables this if a caller really wants the
+          # plain applicationId.
+          GRADLE_EXTRA=""
+          if [ "${BR_NO_DEBUG_SUFFIX:-0}" != "1" ]; then
+            wants_debug=0
+            printf '%s' "$IN_COMMAND" | grep -qiE 'assembledebug|bundledebug|installDebug|:debug|Debug\b' && wants_debug=1
+            supports_suffix=0
+            if [ -f ./build.gradle.kts ] || [ -f ./build.gradle ] || [ -f ./app/build.gradle.kts ] || [ -f ./app/build.gradle ]; then
+              if grep -rqs --include='*.gradle' --include='*.gradle.kts' 'debugSuffix' . 2>/dev/null; then
+                supports_suffix=1
+              fi
+            fi
+            if [ "$wants_debug" = "1" ] && [ "$supports_suffix" = "1" ]; then
+              # Only inject when the caller did not already pass it.
+              if printf '%s' "$IN_COMMAND" | grep -qs 'debugSuffix'; then
+                echo "[build-runner] 调用方已自带 -PdebugSuffix，不重复注入"
+              else
+                GRADLE_EXTRA="-PdebugSuffix"
+                echo "[build-runner] 检测到 debug 构建 + 项目支持 debugSuffix"
+                echo "[build-runner] 自动附加 ${GRADLE_EXTRA}（applicationId 加 .debug，避免与正式版签名冲突）"
+                echo "[build-runner] 如需关闭：设置 BR_NO_DEBUG_SUFFIX=1"
+              fi
+            fi
+          fi
+
           started=$SECONDS
           set +e
+          # `-P` is a project property, not a JVM option, so it cannot ride along
+          # in GRADLE_OPTS. Since the shim/alias approaches are fragile across
+          # `sh` vs `bash` and pipelines, the flag is injected by rewriting the
+          # gradlew invocation in the generated script. The original command is
+          # already echoed above for auditability.
+          if [ -n "$GRADLE_EXTRA" ] && [ "${IN_SHELL:-bash}" != "pwsh" ] && [ "${IN_SHELL:-bash}" != "powershell" ] && [ "${IN_SHELL:-bash}" != "python" ]; then
+            # Append the flag right after every `gradlew` token. Deliberately
+            # simple: a regex clever enough to parse shell quoting would be a
+            # bigger liability than the problem it solves, and `-P` is accepted
+            # anywhere on the command line.
+            sed -i "s/gradlew/gradlew ${GRADLE_EXTRA}/g" "/tmp/br-run.$ext"
+            echo "[build-runner] 已注入 ${GRADLE_EXTRA} 到 gradlew 调用"
+            echo "[build-runner] 实际执行："
+            grep -n 'gradlew' "/tmp/br-run.$ext" | head -5
+          fi
           case "${IN_SHELL:-bash}" in
             pwsh|powershell) pwsh -NoProfile -File "/tmp/br-run.ps1" ;;
             python)          python3 "/tmp/br-run.py" 2>/dev/null || python "/tmp/br-run.py" ;;
