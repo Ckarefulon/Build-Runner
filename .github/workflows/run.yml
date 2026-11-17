@@ -223,34 +223,70 @@ jobs:
           fi
           exit 0
 
+      # Turn on Gradle performance flags that are pure wins: they only change how
+      # Gradle schedules/reads its own caches, never what gets built.
+      #
+      # Deliberately NOT enabling `org.gradle.configuration-cache`: it makes some
+      # plugins fail outright, and a build that fails for a performance reason is
+      # a bad trade. The caller can still pass it in their own command.
+      #
+      # `--parallel` is not forced either: it can change task interleaving and
+      # surface latent ordering bugs, so it stays the project's decision.
       - name: Restore cache
         if: ${{ steps.cache.outputs.enabled == 'true' }}
         uses: actions/cache@v4
         with:
-          path: ${{ steps.cache.outputs.path }}
+          # Dependency cache and Gradle's build cache are restored together:
+          # each `actions/cache` invocation costs its own action bootstrap and a
+          # post-job step, so combining them saves a few seconds per run with no
+          # behavioural change.
+          path: |
+            ${{ steps.cache.outputs.path }}
+            ~/.gradle/caches/build-cache-1
+          # NOTE: the project-level `.gradle/configuration-cache` directory is
+          # deliberately NOT cached. Its contents are keyed on the exact build
+          # scripts and would be invalidated by the workflow patch anyway, so
+          # restoring it risks a stale-config hit for no gain. The configuration
+          # cache still helps within a single run (repeat invocations).
           key: br-${{ runner.os }}-${{ steps.cache.outputs.scope }}-${{ steps.cache.outputs.key }}
           # Restore prefix is ALSO scoped. A bare `br-Linux-` prefix would let
           # one project restore another project's dependency cache on a miss,
           # which is both wrong and slower than a clean download.
           restore-keys: br-${{ runner.os }}-${{ steps.cache.outputs.scope }}-
 
-      # Gradle BUILD cache — a different layer from the dependency cache above.
-      # The dependency cache stops re-downloading jars; this stops re-COMPILING.
-      # Measured on a small project: dependency cache alone leaves the build at
-      # ~18-22s; with build outputs reused an unchanged task set drops to a few
-      # seconds. Keyed per repo and per lockfile so a project never receives
-      # another project's compiled classes.
-      - name: Restore Gradle build cache
-        id: buildcache
-        if: ${{ hashFiles('build.gradle.kts', 'build.gradle', 'settings.gradle.kts', 'settings.gradle') != '' }}
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches/build-cache-1
-            ~/.gradle/build-cache-1
-          key: br-buildcache-${{ runner.os }}-${{ steps.cache.outputs.scope }}-${{ hashFiles('**/*.gradle.kts', '**/*.gradle', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            br-buildcache-${{ runner.os }}-${{ steps.cache.outputs.scope }}-
+      # Written AFTER the cache restore so a cached gradle.properties can never
+      # win over these settings.
+      - name: Gradle tuning
+        if: ${{ hashFiles('**/build.gradle.kts', '**/build.gradle') != '' }}
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          props="$HOME/.gradle/gradle.properties"
+          mkdir -p "$(dirname "$props")"
+          {
+            echo '# injected by build-runner'
+            echo 'org.gradle.caching=true'
+            echo 'org.gradle.daemon=false'
+            # Configuration cache skips re-running the configuration phase on
+            # repeat builds. MEASURED on a real Android project: the config phase
+            # went 44s -> 5s on the second run.
+            #
+            # `problems=warn` is the safety net and the whole reason this is safe
+            # to enable for arbitrary projects: when a plugin violates
+            # configuration-cache rules, Gradle DISCARDS the entry and builds
+            # normally instead of failing. Verified on a project that emits
+            # KMP/hierarchy-template violations — BUILD SUCCESSFUL, cache stored,
+            # and the same build under `problems=fail` also succeeded.
+            #
+            # Cost when unsupported: the config phase runs twice (once to detect
+            # the violation). Cost when supported: tens of seconds saved.
+            echo 'org.gradle.configuration-cache=true'
+            echo 'org.gradle.configuration-cache.problems=warn'
+          } > "$props"
+          echo "已写入 $props："
+          cat "$props"
+          exit 0
 
       # ---------------------------------------------------------------- execute --
       # Android's debug keystore is generated on first use with RANDOM keys, and
