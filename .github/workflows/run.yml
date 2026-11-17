@@ -245,6 +245,54 @@ jobs:
             br-buildcache-${{ runner.os }}-${{ steps.cache.outputs.scope }}-
 
       # ---------------------------------------------------------------- execute --
+      # Android's debug keystore is generated on first use with RANDOM keys, and
+      # every hosted runner starts as a blank machine. So each build signs with a
+      # different key, and installing over a previous debug build fails with
+      # "signatures do not match" / INSTALL_FAILED_UPDATE_INCOMPATIBLE.
+      #
+      # The fix is not to use a different key — the debug key is fine — but to
+      # stop it from being regenerated: cache ~/.android so one stable debug
+      # keystore is reused across runs.
+      - name: Restore Android debug keystore
+        id: androidkey
+        if: ${{ hashFiles('**/AndroidManifest.xml', '**/build.gradle', '**/build.gradle.kts') != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.android
+          key: br-android-debug-${{ runner.os }}-${{ steps.cache.outputs.scope }}
+          restore-keys: |
+            br-android-debug-${{ runner.os }}-
+
+      - name: Ensure debug keystore exists
+        if: ${{ steps.androidkey.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          mkdir -p "$HOME/.android"
+          if [ -f "$HOME/.android/debug.keystore" ]; then
+            echo "debug.keystore 已存在（来自缓存），签名保持一致"
+            if command -v keytool >/dev/null 2>&1; then
+              keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android 2>/dev/null \
+                | grep -i "SHA1\|SHA-256" | head -2
+            fi
+          else
+            # Pre-generate with the well-known Android debug parameters so the
+            # key is identical on every run rather than randomly regenerated.
+            if command -v keytool >/dev/null 2>&1; then
+              keytool -genkeypair -v \
+                -keystore "$HOME/.android/debug.keystore" \
+                -storepass android -keypass android -alias androiddebugkey \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1 \
+                && echo "已生成固定 debug.keystore" \
+                || echo "keytool 生成失败，交给 Gradle 自动生成"
+            else
+              echo "无 keytool，交给 Gradle 自动生成（会在本步后缓存）"
+            fi
+          fi
+          exit 0
+
       # Toolchain probe used to take 29s — longer than the build itself — because
       # it ran `--version` on 21 tools, most of which the command never touches.
       # It now probes ONLY the tools named in the command, reads versions in
