@@ -44,6 +44,10 @@ on:
         description: 'Package file name (without extension). Default: <repo>-<shortsha>'
         required: false
         default: ''
+      package_suffix:
+        description: 'Variant suffix placed before the extension, e.g. debug -> app.debug.apk'
+        required: false
+        default: ''
       release_tag:
         description: 'Release tag. Default: <repo>-<shortsha>'
         required: false
@@ -240,6 +244,7 @@ jobs:
         env:
           IN_PATHS: ${{ inputs.artifact_paths }}
           IN_NAME: ${{ inputs.package_name }}
+          IN_SUFFIX: ${{ inputs.package_suffix }}
           IN_TAG: ${{ inputs.release_tag }}
           REPO_SLUG: ${{ steps.t.outputs.repo }}
           SHORT_SHA: ${{ steps.rev.outputs.short }}
@@ -247,10 +252,23 @@ jobs:
           set -uo pipefail
           slug_safe() { printf '%s' "$1" | tr '/' '-' | tr -cd 'A-Za-z0-9._-'; }
 
-          name="${IN_NAME:-$(slug_safe "$REPO_SLUG")-${SHORT_SHA}}"
-          tag="${IN_TAG:-$name}"
+          base_name="${IN_NAME:-$(slug_safe "$REPO_SLUG")-${SHORT_SHA}}"
+
+          # A variant suffix such as `debug` goes BEFORE the extension so the
+          # file reads `app.debug.apk` rather than `app.apk.debug` (which no
+          # installer would recognise). It also keeps debug builds visually
+          # distinct from release builds on a phone.
+          suffix="${IN_SUFFIX:-}"
+          suffix="${suffix#.}"
+          if [ -n "$suffix" ]; then
+            name="${base_name}.${suffix}"
+          else
+            name="$base_name"
+          fi
+          tag="${IN_TAG:-$base_name}"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "tag=$tag"   >> "$GITHUB_OUTPUT"
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
 
           # Collect the matched paths first. `zip -r` with a glob that matches
           # nothing produces an empty but valid archive, which would silently
@@ -280,11 +298,15 @@ jobs:
           if [ "${#matched[@]}" -eq 1 ] && [ -f "${matched[0]}" ]; then
             src="${matched[0]}"
             base=$(basename "$src")
-            # Publish the single artifact under the caller's package name, but
-            # KEEP its extension: a phone must recognise `.apk`, and a release
-            # asset named `foo.zip` that is really an APK would be unusable.
-            ext="${base##*.}"
-            if [ "$ext" = "$base" ]; then ext="bin"; fi
+            # Extension must stay LAST, so the variant suffix belongs before it:
+            #   app-debug.apk + suffix "debug" -> <name>.debug.apk
+            # An APK wrapped in a zip cannot be installed on a phone, so a single
+            # file is published as-is.
+            if [ "$base" = "${base##*.}" ]; then
+              ext="bin"
+            else
+              ext="${base##*.}"
+            fi
             case "$name" in
               *".$ext") zipfile="$name" ;;
               *)        zipfile="${name}.${ext}" ;;
