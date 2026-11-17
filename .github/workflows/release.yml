@@ -195,13 +195,29 @@ jobs:
       # The debug key itself is fine — the problem is that it kept changing. One
       # stable keystore, restored from cache, makes repeated debug installs work.
       # This lives in the release workflow too because packages are built here.
+      # One key per target repo, with the slash sanitized: a cache key may only
+      # contain [-_.A-Za-z0-9], so `owner/repo` produced an invalid key and the
+      # keystore was never actually restored — it was regenerated on every run.
+      - name: Compute cache scope
+        id: scope
+        shell: bash
+        env:
+          IN_REPO: ${{ steps.t.outputs.repo }}
+        run: |
+          set +e
+          set +o pipefail
+          s=$(printf '%s' "${IN_REPO:-this-repo}" | tr '/' '-' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)
+          echo "scope=$s" >> "$GITHUB_OUTPUT"
+          echo "cache scope: $s"
+          exit 0
+
       - name: Restore Android debug keystore
         id: androidkey
         if: ${{ true }}
         uses: actions/cache@v4
         with:
           path: ~/.android
-          key: br-android-debug-${{ runner.os }}-${{ steps.t.outputs.repo }}
+          key: br-android-debug-${{ runner.os }}-${{ steps.scope.outputs.scope }}
 
       - name: Ensure debug keystore exists
         if: ${{ true }}
@@ -569,17 +585,6 @@ jobs:
           echo "committed=$COMMITTED"
           echo "=================================================================="
 
-      # Disposable patch branch must not accumulate.
-      - name: Cleanup patch branch
-        if: ${{ always() && inputs.patch_ref != '' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.release_token || github.token }}
-          IN_REF: ${{ inputs.patch_ref }}
-        run: |
-          set +e
-          set +o pipefail
-          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${IN_REF}" >/dev/null 2>&1 \
-            && echo "已删除临时补丁分支 ${IN_REF}" \
-            || echo "临时分支删除失败（可忽略，下次会被覆盖）"
-          exit 0
+      # NOTE: the patch branch is reused and overwritten, not deleted — a cleanup
+      # step would cost an extra container step to remove something the next
+      # build of the same target overwrites.
