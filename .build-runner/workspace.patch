@@ -12871,7 +12871,7 @@ index e2baea9d..ced13f8d 100644
       * 拖动中也收（以前只在松手那一次收——那样预览留着空行、松手一压缩，落点就和看到的不一样，
       * 于是 16278fd7 那轮反过来取消了松手压缩，空行就永远留着了）。现在两边都收，预览与落盘
 diff --git a/shared/model/src/commonMain/kotlin/com/xjtu/toolbox/schedule/CourseLinkMatching.kt b/shared/model/src/commonMain/kotlin/com/xjtu/toolbox/schedule/CourseLinkMatching.kt
-index 2b921e22..ba51065f 100644
+index 2b921e22..2275575b 100644
 --- a/shared/model/src/commonMain/kotlin/com/xjtu/toolbox/schedule/CourseLinkMatching.kt
 +++ b/shared/model/src/commonMain/kotlin/com/xjtu/toolbox/schedule/CourseLinkMatching.kt
 @@ -48,24 +48,26 @@ class SlotAttendanceMarks(
@@ -12907,7 +12907,7 @@ index 2b921e22..ba51065f 100644
          if (sameDay.isEmpty()) return null
          // 先按起始节精确命中，再容忍「流水里的节次落在这门课的节次区间内」
          return sameDay.firstOrNull { it.startTime == startSection }
-@@ -88,6 +90,28 @@ class SlotAttendanceMarks(
+@@ -88,6 +90,41 @@ class SlotAttendanceMarks(
      }
  }
  
@@ -12915,8 +12915,8 @@ index 2b921e22..ba51065f 100644
 + * 这条流水是不是这门课的。
 + *
 + * 课程号优先：考勤系统和教务用的是同一套课程号，能比对就别去比名字。
-+ * 课程号都为空（脏数据 / 老记录）才退回课名，并且**归一化后**再比 —— 两个系统对
-+ * 全角括号、空格、班号后缀的处理不一致，逐字比会把同一门课判成两门。
++ * 课程号都为空（脏数据 / 老记录）才退回课名，且只做**窄**归一化，
++ * 见 [courseNameKey]。
 + */
 +private fun AttendanceWaterRecord.sameCourse(courseName: String, courseCode: String): Boolean {
 +    val wantCode = courseCode.trim()
@@ -12930,8 +12930,21 @@ index 2b921e22..ba51065f 100644
 +    }
 +    if (courseName.isBlank()) return true
 +    if (this.courseName.isBlank()) return false
-+    return this.courseName.normalizedCourseName() == courseName.normalizedCourseName()
++    return this.courseName.courseNameKey() == courseName.courseNameKey()
 +}
++
++/**
++ * 比课名用的键：只抹掉「同一个名字的两种写法」的差异 —— 空白、全角半角括号。
++ *
++ * **故意不用 [normalizedCourseName]**：那个会剥掉结尾的括号后缀，对教材匹配是对的
++ * （「高等数学（上）」「高等数学（下）」共用一个教材表），但拿来认考勤就会把
++ * 「大学物理」和「大学物理（实验）」判成同一门 —— 那天同一节课两门都上，
++ * 于是讲座的考勤显示在实验课上。宁可认不出，也不能认错。
++ */
++private fun String.courseNameKey(): String = trim()
++    .replace(Regex("[\\s　]"), "")
++    .replace('（', '(')
++    .replace('）', ')')
 +
  /**
   * 拉到的考勤流水 → 课表格子索引。
@@ -12972,7 +12985,7 @@ index 7b73b8cd..6b5298ac 100644
      @Test
      fun `空位扫描被行数上界挡住`() {
 diff --git a/shared/model/src/commonTest/kotlin/com/xjtu/toolbox/schedule/AttendanceRecordAtTest.kt b/shared/model/src/commonTest/kotlin/com/xjtu/toolbox/schedule/AttendanceRecordAtTest.kt
-index d0828ff6..51e2ba26 100644
+index d0828ff6..78e13f68 100644
 --- a/shared/model/src/commonTest/kotlin/com/xjtu/toolbox/schedule/AttendanceRecordAtTest.kt
 +++ b/shared/model/src/commonTest/kotlin/com/xjtu/toolbox/schedule/AttendanceRecordAtTest.kt
 @@ -21,10 +21,11 @@ class AttendanceRecordAtTest {
@@ -12988,7 +13001,7 @@ index d0828ff6..51e2ba26 100644
      )
  
      @Test
-@@ -70,4 +71,38 @@ class AttendanceRecordAtTest {
+@@ -70,4 +71,43 @@ class AttendanceRecordAtTest {
          val marks = attendanceMarksOf(listOf(rec(date = "2026-11-17 08:00:00")))
          assertEquals(WaterType.NORMAL, marks.recordAt("2026-11-17", 3, 4, "高等数学")?.status)
      }
@@ -13019,12 +13032,17 @@ index d0828ff6..51e2ba26 100644
 +    }
 +
 +    @Test
-+    fun `课名归一化后相同就认，但不会把另一门课认成自己的`() {
-+        // 归一是去空白、剥结尾括号：全角半角、有没有空格都能对上
-+        val marks = attendanceMarksOf(listOf(rec(name = "大学物理(实验)")))
-+        assertEquals(WaterType.NORMAL, marks.recordAt("2026-11-17", 3, 4, courseName = "大学物理（实验）")?.status)
-+        // 但不做包含匹配：「大学物理」不能吃掉「大学物理实验」，那是两门课
++    fun `课名只统一全角半角与空白，不剥括号后缀`() {
++        // 全角半角括号、多余空格都算同一种写法
++        val marks = attendanceMarksOf(listOf(rec(name = "大学物理（实验）")))
++        assertEquals(
++            WaterType.NORMAL,
++            marks.recordAt("2026-11-17", 3, 4, courseName = " 大学物理(实验) ")?.status,
++        )
++        // 但**不**做「剥掉结尾括号」那种归一化：「大学物理」和「大学物理（实验）」是两门课，
++        // 同一节课两门都上时，认错就等于把讲座的考勤显示在实验课上
 +        assertNull(marks.recordAt("2026-11-17", 3, 4, courseName = "大学物理"))
++        assertNull(marks.recordAt("2026-11-17", 3, 4, courseName = "大学物理实验"))
 +    }
  }
 diff --git a/shared/model/src/jvmMain/kotlin/com/xjtu/toolbox/platform/KeyValueStore.jvm.kt b/shared/model/src/jvmMain/kotlin/com/xjtu/toolbox/platform/KeyValueStore.jvm.kt
