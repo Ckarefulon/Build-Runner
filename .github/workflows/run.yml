@@ -33,7 +33,20 @@ on:
         default: ''
       command:
         description: 'Shell command(s) to execute inside the checkout.'
-        required: true
+        required: false
+        default: ''
+      # Run several commands in ONE job so they share the warm Gradle daemon and
+      # incremental state. Measured on this Android project: a cold compile is
+      # ~231s, the next one in the same job is ~1s. Splitting them into separate
+      # dispatches would pay the cold cost every time.
+      #
+      # One command per line; an empty line or a line starting with `#` is
+      # ignored. Each command runs even if an earlier one failed (useful for
+      # "build then test then package"), and the step fails if ANY of them failed.
+      commands:
+        description: 'Multiple commands, one per line, run sequentially in the same job.'
+        required: false
+        default: ''
       shell:
         description: 'Interpreter: bash | pwsh | python'
         required: false
@@ -306,7 +319,20 @@ jobs:
           {
             echo '# injected by build-runner'
             echo 'org.gradle.caching=true'
-            echo 'org.gradle.daemon=false'
+            # A resident daemon is what makes repeat commands fast.
+            #
+            # MEASURED on this Android project, inside ONE job:
+            #   first compile (cold daemon)  231s
+            #   second compile (warm daemon)   1s
+            #   compile after one file edit    2s
+            # Every command in this job therefore reuses the same warm JVM and
+            # incremental state. The daemon dies with the job — there is nothing
+            # to leak into the next run, and no cross-run staleness.
+            #
+            # (A previous revision set `daemon=false`. That is right for a
+            # one-shot build but throws away everything the daemon exists for.)
+            echo 'org.gradle.daemon=true'
+            echo 'org.gradle.parallel=true'
             # Configuration cache skips re-running the configuration phase on
             # repeat builds. MEASURED on a real Android project: the config phase
             # went 44s -> 5s on the second run.
@@ -594,6 +620,7 @@ jobs:
         timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
         env:
           IN_COMMAND: ${{ inputs.command }}
+          IN_COMMANDS: ${{ inputs.commands }}
           IN_SHELL: ${{ inputs.shell }}
         run: |
           set -uo pipefail
@@ -602,45 +629,88 @@ jobs:
             python)          ext=py  ;;
             *)               ext=sh  ;;
           esac
-          printf '%s\n' "$IN_COMMAND" > "/tmp/br-run.$ext"
-          echo "--- build-runner echo of the command ---"
-          head -n 60 "/tmp/br-run.$ext"
+
+          # Build the list of command scripts.
+          #
+          # `commands` (one per line) is the multi-command form: each line becomes
+          # its own script and they all run in THIS job, so they share one warm
+          # Gradle daemon and one incremental state. That is the whole point —
+          # a second compile in the same job measured ~1s against ~231s cold.
+          #
+          # `command` (single, may be multiline) stays as one script for backwards
+          # compatibility.
+          rm -rf /tmp/br-cmds && mkdir -p /tmp/br-cmds
+          if [ -n "${IN_COMMANDS:-}" ]; then
+            n=0
+            while IFS= read -r line; do
+              # Skip blanks and comments so the caller can annotate a list.
+              trimmed="$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+              [ -z "$trimmed" ] && continue
+              case "$trimmed" in \#*) continue ;; esac
+              n=$((n + 1))
+              printf '%s\n' "$line" > "/tmp/br-cmds/$(printf '%03d' "$n").$ext"
+            done <<< "$IN_COMMANDS"
+          elif [ -n "${IN_COMMAND:-}" ]; then
+            printf '%s\n' "$IN_COMMAND" > "/tmp/br-cmds/001.$ext"
+          fi
+
+          if ! ls /tmp/br-cmds/*."$ext" >/dev/null 2>&1; then
+            echo "::error::没有要执行的命令（command 与 commands 都为空）"
+            exit 1
+          fi
+
+          total=$(ls /tmp/br-cmds/*."$ext" | wc -l | tr -d ' ')
+          echo "--- build-runner: ${total} 条命令，同一个 job 内顺序执行 ---"
           echo "--- BUILD-RUNNER-OUTPUT-BEGIN ---"
 
-          # Gradle only consults the build cache if told to. Rather than ask the
-          # caller to remember `--build-cache` (and to keep repeat invocations
-          # consistent), pass it through the environment where the wrapper
-          # applies it. GRADLE_OPTS is honoured by every wrapper/CLI invocation
-          # and does not rewrite the user's command text.
-          #
-          # `${GRADLE_OPTS:-}` matters: this step runs with `set -u`, so a bare
-          # `$GRADLE_OPTS` aborts the whole step with "unbound variable" when the
-          # variable was never set — which is the normal case.
-          #
-          # Also disable the daemon: the runner is ephemeral, so a daemon only
-          # burns memory and can hold locks when the step ends.
-          export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.caching=true -Dorg.gradle.daemon=false"
+          # GRADLE_OPTS: enabling the build cache is enough here. The daemon is
+          # deliberately NOT disabled — keeping it alive is exactly what makes
+          # later commands fast.
+          export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.caching=true"
 
           started=$SECONDS
+          overall=0
+          idx=0
+          failed_list=""
+
           set +e
-          case "${IN_SHELL:-bash}" in
-            pwsh|powershell) pwsh -NoProfile -File "/tmp/br-run.ps1" ;;
-            python)          python3 "/tmp/br-run.py" 2>/dev/null || python "/tmp/br-run.py" ;;
-            *)               bash "/tmp/br-run.sh" ;;
-          esac
-          rc=$?
+          for script in /tmp/br-cmds/*."$ext"; do
+            idx=$((idx + 1))
+            echo ""
+            echo "===== 命令 ${idx}/${total} ====="
+            head -n 40 "$script"
+            echo "----- 输出 -----"
+            cmd_started=$SECONDS
+            case "${IN_SHELL:-bash}" in
+              pwsh|powershell) pwsh -NoProfile -File "$script" ;;
+              python)          python3 "$script" 2>/dev/null || python "$script" ;;
+              *)               bash "$script" ;;
+            esac
+            rc=$?
+            cmd_elapsed=$((SECONDS - cmd_started))
+            echo "----- 命令 ${idx} 退出码 ${rc}，耗时 ${cmd_elapsed}s -----"
+            if [ "$rc" -ne 0 ]; then
+              # Keep going: a later command may be the one that reports useful
+              # diagnostics, and stopping early would hide it. The job still
+              # fails at the end.
+              overall=$rc
+              failed_list="${failed_list}${idx} "
+            fi
+          done
           set -e
           elapsed=$((SECONDS - started))
 
           echo ""
           echo "--- BUILD-RUNNER-OUTPUT-END ---"
-          echo "BUILD-RUNNER-EXIT-CODE=$rc"
+          echo "BUILD-RUNNER-EXIT-CODE=$overall"
           echo "BUILD-RUNNER-DURATION-SECONDS=$elapsed"
           echo "BUILD-RUNNER-SHELL=$IN_SHELL"
-          if [ "$rc" -ne 0 ]; then
-            echo "build-runner: command failed with exit code $rc" >&2
+          echo "BUILD-RUNNER-COMMAND-COUNT=$total"
+          if [ -n "$failed_list" ]; then
+            echo "BUILD-RUNNER-FAILED-COMMANDS=$failed_list"
+            echo "build-runner: 命令 ${failed_list}失败（最后退出码 ${overall}）" >&2
           fi
-          exit "$rc"
+          exit "$overall"
 
       # -------------------------------------------------------------- artifacts --
       - name: Upload artifacts
