@@ -352,6 +352,22 @@ jobs:
           echo "cache scope: $s"
           exit 0
 
+      # Android's debug keystore must be STABLE ACROSS RUNS.
+      #
+      # Every hosted runner starts blank, so Gradle would generate a random debug
+      # key on each build — and installing an update whose signature differs from
+      # the installed build fails with INSTALL_FAILED_UPDATE_INCOMPATIBLE.
+      #
+      # A cache alone is not enough: `actions/cache` entries are evicted by LRU,
+      # expire after 7 days unused, and vanish when anyone clears caches. Each
+      # eviction silently changes the signing identity.
+      #
+      # So the keystore lives IN THIS REPOSITORY (`android/debug.keystore`) and is
+      # copied into place every run. It is not a secret: the Android debug key is
+      # a well-known SDK artifact (storepass/keypass `android`). What matters is
+      # only that it never changes.
+      # Cache kept ONLY as a fallback for repositories that have not checked in
+      # `android/debug.keystore` yet; the repository copy always wins.
       - name: Restore Android debug keystore
         id: androidkey
         if: ${{ true }}
@@ -369,25 +385,35 @@ jobs:
           set +e
           set +o pipefail
           mkdir -p "$HOME/.android"
-          if [ -f "$HOME/.android/debug.keystore" ]; then
-            echo "debug.keystore 已存在（来自缓存），签名保持一致"
-            if command -v keytool >/dev/null 2>&1; then
-              keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android 2>/dev/null \
-                | grep -i "SHA1\|SHA-256" | head -2
-            fi
+          target="$HOME/.android/debug.keystore"
+
+          if [ -f "$GITHUB_WORKSPACE/android/debug.keystore" ]; then
+            # Durable source of truth: the checked-in keystore always wins, so
+            # losing the cache can never change the signing identity.
+            cp -f "$GITHUB_WORKSPACE/android/debug.keystore" "$target"
+            chmod 600 "$target" 2>/dev/null
+            echo "已安装仓库内的固定 debug.keystore"
+          elif [ -f "$target" ]; then
+            echo "使用缓存中的 debug.keystore"
+          elif command -v keytool >/dev/null 2>&1; then
+            # Absolute last resort. Note this generates a NEW random key pair:
+            # the fixed dname only fixes the certificate subject, not the key.
+            keytool -genkeypair -v \
+              -keystore "$target" \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1 \
+              && echo "::warning::临时生成 debug.keystore —— 签名可能与既有安装不同" \
+              || echo "keytool 生成失败，交给 Gradle"
           else
-            # Pre-generate with the well-known Android debug parameters so the
-            # key is identical on every run rather than randomly regenerated.
-            if command -v keytool >/dev/null 2>&1; then
-              keytool -genkeypair -v \
-                -keystore "$HOME/.android/debug.keystore" \
-                -storepass android -keypass android -alias androiddebugkey \
-                -keyalg RSA -keysize 2048 -validity 10000 \
-                -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1 \
-                && echo "已生成固定 debug.keystore" \
-                || echo "keytool 生成失败，交给 Gradle 自动生成"
-            else
-              echo "无 keytool，交给 Gradle 自动生成（会在本步后缓存）"
+            echo "无可用 keystore，交给 Gradle 生成"
+          fi
+
+          if command -v keytool >/dev/null 2>&1 && [ -f "$target" ]; then
+            keytool -list -keystore "$target" -storepass android 2>/dev/null \
+              | grep -i "SHA-256\|SHA1" | head -1
+          fi
+          exit 0
             fi
           fi
           exit 0
