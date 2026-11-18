@@ -640,7 +640,7 @@ index f1041e9c..c9dd6612 100644
      <TextView
          android:layout_width="match_parent"
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
-index 4d82b876..46a5393e 100644
+index 4d82b876..586f836b 100644
 --- a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
 @@ -4,7 +4,9 @@ import com.xjtu.toolbox.attendance.AttendanceWaterRecord
@@ -718,7 +718,7 @@ index 4d82b876..46a5393e 100644
 +        val swipe = LocalSwipe(minuteOfDay = 9 * 60 + 58, location = "主楼A-202")
 +        val s = scene(10 * 60 + 6, attendance = null, swipe = swipe)
 +        assertEquals("已刷卡 · 待结算", s.status)
-+        assertEquals("刷卡 09:58", s.meta, "要如实说这是刷卡时刻，不是「刚刚查过」")
++        assertEquals("要如实说这是刷卡时刻，不是「刚刚查过」", "刷卡 09:58", s.meta)
 +        assertFalse("已经刷上了，只差结算，不必再五分钟问一次", s.needsWatching)
 +    }
 +
