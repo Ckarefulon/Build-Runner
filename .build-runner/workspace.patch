@@ -1933,7 +1933,7 @@ index 970a26a8..04b0de16 100644
   */
  class LmsDueStoreTest {
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
-index 4d82b876..d9bc5ae6 100644
+index 4d82b876..d5f60207 100644
 --- a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
 @@ -4,7 +4,9 @@ import com.xjtu.toolbox.attendance.AttendanceWaterRecord
@@ -1984,12 +1984,12 @@ index 4d82b876..d9bc5ae6 100644
 +    @Test
 +    fun `只有真的记录才不需要再盯着看`() {
 +        // 没记录 = 结论随时会被学校那条记录推翻，卡片要自己回来看一眼
-+        assertTrue(scene(10 * 60 + 1, null).needsWatching, "待考勤要盯着")
-+        assertTrue(scene(10 * 60 + 6, null).needsWatching, "迟到·还没刷上更要盯着")
-+        assertFalse(scene(10 * 60 + 10, marks(WaterType.NORMAL)).needsWatching, "有记录就不必再回来")
-+        assertFalse(scene(10 * 60 + 10, marks(WaterType.LEAVE)).needsWatching, "请假也是定论")
++        assertTrue("待考勤要盯着", scene(10 * 60 + 1, null).needsWatching)
++        assertTrue("迟到·还没刷上更要盯着", scene(10 * 60 + 6, null).needsWatching)
++        assertFalse("有记录就不必再回来", scene(10 * 60 + 10, marks(WaterType.NORMAL)).needsWatching)
++        assertFalse("请假也是定论", scene(10 * 60 + 10, marks(WaterType.LEAVE)).needsWatching)
 +        // 不是上课那一屏就没有「等他刷卡」这回事
-+        assertFalse(scene(9 * 60 + 30, marks(WaterType.NORMAL)).needsWatching)
++        assertFalse("别的场景不用盯", scene(9 * 60 + 30, marks(WaterType.NORMAL)).needsWatching)
 +    }
  }
 diff --git a/core/build.gradle.kts b/core/build.gradle.kts
