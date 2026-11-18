@@ -1,0 +1,208 @@
+# Build-Runner — resident session.
+#
+# Starts ONE job that stays alive with a warm build environment and executes
+# commands handed to it one at a time, so an agent can inspect output before
+# choosing the next command.
+#
+# Why: a fresh `run` dispatch pays the cold cost every time. MEASURED on this
+# Android project: first compile 290s, then 2s and 1s for the next two in the same
+# job. Reusing that environment ACROSS tool calls is the whole point.
+#
+# Transport: a GitHub issue. Each command is a comment, each result is a comment.
+# Comments are append-only, so the caller and the runner never contend for a ref,
+# and nothing is written to git history.
+#
+# Hard limits, stated plainly:
+#   - one job may live at most 6 hours, so a session cannot exceed that
+#   - the workspace is destroyed when the job ends
+name: Build Runner Session
+
+run-name: build-runner-session-${{ inputs.session }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      session:
+        description: 'Caller-chosen session id.'
+        required: true
+      issue:
+        description: 'Issue number used as the command/result channel.'
+        required: true
+      repo:
+        description: 'Target repository (owner/name).'
+        required: true
+      ref:
+        description: 'Branch/tag/SHA of the target repository.'
+        required: false
+        default: ''
+      shell:
+        description: 'Interpreter: bash | pwsh | python'
+        required: false
+        default: 'bash'
+      setup:
+        description: 'Commands run once before serving (install deps etc).'
+        required: false
+        default: ''
+      runner:
+        description: 'Runner label.'
+        required: false
+        default: 'ubuntu-latest'
+      timeout_minutes:
+        description: 'Max session lifetime in minutes (job cap is 6h).'
+        required: false
+        default: '120'
+      idle_seconds:
+        description: 'End the session after this long with no commands.'
+        required: false
+        default: '900'
+      workspace_patch:
+        description: 'Patch applied after checkout (same format as run.yml).'
+        required: false
+        default: ''
+      patch_ref:
+        description: 'Branch holding the workspace patch when too large for an input.'
+        required: false
+        default: ''
+      fetch_depth:
+        description: 'git fetch depth (0 = full history).'
+        required: false
+        default: '0'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: build-runner-session-${{ inputs.session }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: '1'
+  CI: 'true'
+
+jobs:
+  session:
+    name: resident session
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    steps:
+      # The engine repo is needed twice: the session runner script lives here, and
+      # a checked-in debug keystore (when present) must be installed.
+      - name: Checkout engine
+        uses: actions/checkout@v4
+        with:
+          path: engine
+          fetch-depth: 1
+
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.checkout_token || github.token }}
+          path: work
+          fetch-depth: ${{ inputs.fetch_depth == '0' && '0' || inputs.fetch_depth }}
+          persist-credentials: false
+
+      - name: Install Android debug keystore
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          mkdir -p "$HOME/.android"
+          # A stable debug signing identity: prefer the engine repo's checked-in
+          # copy, then the target's own. Without one, Gradle generates a random
+          # key per run and updates fail with a signature mismatch.
+          for candidate in "$GITHUB_WORKSPACE/engine/android/debug.keystore" \
+                           "$GITHUB_WORKSPACE/work/android/debug.keystore" \
+                           "$GITHUB_WORKSPACE/work/debug.keystore"; do
+            if [ -f "$candidate" ]; then
+              cp -f "$candidate" "$HOME/.android/debug.keystore"
+              echo "已安装 $candidate"
+              break
+            fi
+          done
+          [ -f "$HOME/.android/debug.keystore" ] || echo "::warning::没有固定 keystore，签名可能在每次会话间变化"
+          exit 0
+
+      - name: Gradle tuning
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          props="$HOME/.gradle/gradle.properties"
+          mkdir -p "$(dirname "$props")"
+          {
+            echo '# injected by build-runner session'
+            echo 'org.gradle.caching=true'
+            # A single daemon for the whole session: every command after the first
+            # compiles incrementally instead of from scratch.
+            echo 'org.gradle.daemon=true'
+            echo 'org.gradle.parallel=true'
+            echo 'org.gradle.configuration-cache=true'
+            echo 'org.gradle.configuration-cache.problems=warn'
+          } > "$props"
+          cat "$props"
+          exit 0
+
+      - name: Apply workspace patch
+        if: ${{ inputs.patch_ref != '' || inputs.workspace_patch != '' }}
+        shell: bash
+        working-directory: work
+        env:
+          IN_PATCH: ${{ inputs.workspace_patch }}
+          IN_REF: ${{ inputs.patch_ref }}
+        run: |
+          set +e
+          set +o pipefail
+          if [ -n "${IN_REF:-}" ]; then
+            url="https://raw.githubusercontent.com/${{ github.repository }}/${IN_REF}/.build-runner/workspace.patch"
+            curl -fsSL "$url" -o /tmp/br.patch.raw || { echo "::error::补丁获取失败"; exit 1; }
+            head -c 5 /tmp/br.patch.raw | grep -q '^diff ' && cp /tmp/br.patch.raw /tmp/br.patch \
+              || base64 -d < /tmp/br.patch.raw > /tmp/br.patch
+          elif [ -n "${IN_PATCH:-}" ]; then
+            printf '%s' "$IN_PATCH" | base64 -d > /tmp/br.patch
+          fi
+          if [ -s /tmp/br.patch ]; then
+            git apply --binary --whitespace=nowarn /tmp/br.patch \
+              || git apply --binary --whitespace=nowarn -3 /tmp/br.patch \
+              || { echo "::error::补丁应用失败"; exit 1; }
+            echo "已应用本地改动补丁"
+          fi
+          exit 0
+
+      - name: Setup commands
+        if: ${{ inputs.setup != '' }}
+        shell: bash
+        working-directory: work
+        env:
+          IN_SETUP: ${{ inputs.setup }}
+          IN_SHELL: ${{ inputs.shell }}
+        run: |
+          set -euo pipefail
+          case "${IN_SHELL:-bash}" in
+            pwsh|powershell) ext=ps1 ;;
+            python)          ext=py  ;;
+            *)               ext=sh  ;;
+          esac
+          printf '%s\n' "$IN_SETUP" > "/tmp/br-setup.$ext"
+          case "${IN_SHELL:-bash}" in
+            pwsh|powershell) pwsh -NoProfile -File "/tmp/br-setup.ps1" ;;
+            python)          python3 "/tmp/br-setup.py" 2>/dev/null || python "/tmp/br-setup.py" ;;
+            *)               bash "/tmp/br-setup.sh" ;;
+          esac
+
+      # The loop runs in the target checkout, inside this same job, so the daemon,
+      # incremental state and working tree all survive between commands.
+      - name: Serve commands
+        shell: bash
+        working-directory: work
+        env:
+          GH_TOKEN: ${{ secrets.session_token || github.token }}
+          SESSION_REPO: ${{ github.repository }}
+          SESSION_ISSUE: ${{ inputs.issue }}
+          SESSION_SHELL: ${{ inputs.shell }}
+          SESSION_IDLE_SECONDS: ${{ inputs.idle_seconds }}
+          SESSION_POLL_SECONDS: '3'
+        run: |
+          node "$GITHUB_WORKSPACE/engine/session-runner.mjs"
