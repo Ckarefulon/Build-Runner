@@ -14,7 +14,7 @@
  * repository's git history.
  */
 import { execFile, spawn } from 'node:child_process'
-import { writeFile, mkdtemp } from 'node:fs/promises'
+import { writeFile, mkdtemp, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
@@ -85,7 +85,104 @@ function parseCommand(body) {
   const id = first.slice('BR-CMD:'.length).trim()
   const fence = body.match(/```[a-z]*\n([\s\S]*?)```/)
   if (!id || !fence) return null
-  return { id, command: fence[1].replace(/\n$/, '') }
+  const inner = fence[1].replace(/\n$/, '')
+
+  // Two shapes accepted, for backwards compatibility:
+  //   raw command text            (the original form)
+  //   {"command": "...", "artifactPaths": "..."}   (richer form)
+  if (inner.trimStart().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(inner)
+      if (typeof parsed.command === 'string') {
+        return { id, command: parsed.command, artifactPaths: parsed.artifactPaths ?? '' }
+      }
+    } catch {
+      /* fall through to raw */
+    }
+  }
+  return { id, command: inner, artifactPaths: '' }
+}
+
+/**
+ * Upload build outputs as release assets.
+ *
+ * A debug APK is tens of MB. Committing it to a branch would bloat the
+ * repository permanently, and `actions/upload-artifact` needs an authenticated
+ * caller to download. Release assets avoid both problems: no git history, and a
+ * plain download URL.
+ *
+ * One rolling tag is reused so sessions do not litter the releases page.
+ */
+async function uploadArtifacts(rawPaths, id) {
+  const paths = String(rawPaths)
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+  if (paths.length === 0) return []
+
+  const tag = 'br-session-artifacts'
+  let release = null
+  try {
+    release = await api('GET', `/releases/tags/${tag}`)
+  } catch {
+    try {
+      release = await api('POST', '/releases', {
+        tag_name: tag,
+        name: 'build-runner session artifacts',
+        body: 'Session build outputs. Safe to delete; new uploads recreate them.',
+        prerelease: true,
+      })
+    } catch (error) {
+      console.log(`创建 release 失败：${error.message}`)
+      return []
+    }
+  }
+
+  const uploads = []
+  for (const pattern of paths) {
+    let files = []
+    try {
+      const { stdout } = await run('bash', ['-c', `ls -1 ${pattern} 2>/dev/null || true`], {
+        env: CHILD_ENV,
+        encoding: 'utf8',
+      })
+      files = stdout.split('\n').map(f => f.trim()).filter(Boolean)
+    } catch {
+      files = []
+    }
+    for (const file of files.slice(0, 10)) {
+      try {
+        const name = `${id}-${file.split('/').pop()}`
+        const buffer = await readFile(file)
+        // Asset upload is a different host from the REST API.
+        const url = `https://uploads.github.com/repos/${REPO}/releases/${release.id}/assets?name=${encodeURIComponent(name)}`
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${TOKEN}`,
+            'Content-Type': 'application/octet-stream',
+            'User-Agent': 'build-runner-session',
+          },
+          body: buffer,
+        })
+        if (!response.ok) {
+          console.log(`上传 ${file} 失败：${response.status}`)
+          continue
+        }
+        const asset = await response.json()
+        uploads.push({
+          file,
+          name,
+          bytes: buffer.length,
+          url: asset.browser_download_url,
+        })
+        console.log(`已上传资产 ${name} (${buffer.length} 字节)`)
+      } catch (error) {
+        console.log(`上传 ${file} 出错：${error.message}`)
+      }
+    }
+  }
+  return uploads
 }
 
 /**
@@ -254,6 +351,14 @@ async function main() {
       const result = isShot ? await captureScreenshot() : await execute(item.command)
       console.log(`----- 退出码 ${result.exitCode} -----`)
       console.log(String(result.output ?? '').slice(-2000))
+
+      // Collect declared outputs even when the command failed: a partial package
+      // is often exactly what the caller needs to diagnose.
+      if (item.artifactPaths) {
+        const artifacts = await uploadArtifacts(item.artifactPaths, item.id)
+        if (artifacts.length > 0) result.artifacts = artifacts
+        console.log(`产物：${artifacts.length} 个`)
+      }
 
       try {
         await postResult(item.id, result)
