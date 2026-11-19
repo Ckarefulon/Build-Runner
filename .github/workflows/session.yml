@@ -67,6 +67,13 @@ on:
         description: 'git fetch depth (0 = full history).'
         required: false
         default: '0'
+      emulator:
+        description: >-
+          Boot an Android emulator in this session. JSON, e.g.
+          {"api":34,"arch":"x86_64","profile":"pixel_7","image":"google_apis"}.
+          Empty = no emulator.
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -123,6 +130,94 @@ jobs:
             fi
           done
           [ -f "$HOME/.android/debug.keystore" ] || echo "::warning::没有固定 keystore，签名可能在每次会话间变化"
+          exit 0
+
+      # Boot an Android emulator, so the agent can install and exercise the app
+      # instead of only compiling it.
+      #
+      # Every step here is load-bearing and was found the hard way:
+      #   - `sudo chmod 666 /dev/kvm`: the runner user is NOT in the `kvm` group,
+      #     so /dev/kvm (root:kvm 660) is denied. Without this the emulator falls
+      #     back to software rendering and never finishes booting.
+      #   - install `emulator` AND the system image together: a fresh VM per job
+      #     means nothing survives from a previous run.
+      #   - `printf 'y...'` instead of `yes |`: `yes` dies of SIGPIPE and
+      #     sdkmanager then *silently* reports success without installing.
+      #   - wait for `sys.boot_completed`, not just for the device to appear.
+      #
+      # MEASURED end to end on ubuntu-latest: install 37s, AVD 1s, boot 39s,
+      # screencap 1s — about 80s total.
+      - name: Start emulator
+        if: ${{ inputs.emulator != '' }}
+        shell: bash
+        env:
+          IN_EMULATOR: ${{ inputs.emulator }}
+        run: |
+          set +e
+          set +o pipefail
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator"
+
+          api=$(printf '%s' "$IN_EMULATOR" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).api||34)}catch(e){console.log(34)}})")
+          arch=$(printf '%s' "$IN_EMULATOR" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).arch||'x86_64')}catch(e){console.log('x86_64')}})")
+          profile=$(printf '%s' "$IN_EMULATOR" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).profile||'pixel_7')}catch(e){console.log('pixel_7')}})")
+          image=$(printf '%s' "$IN_EMULATOR" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).image||'google_apis')}catch(e){console.log('google_apis')}})")
+
+          pkg="system-images;android-${api};${image};${arch}"
+          echo "emulator package: $pkg  profile: $profile"
+
+          # Hardware acceleration. Without the group fix this is denied and the
+          # emulator silently degrades to unusably slow software rendering.
+          sudo -n chmod 666 /dev/kvm 2>/dev/null || true
+          echo "kvm: $(ls -l /dev/kvm 2>&1)"
+
+          t0=$(date +%s)
+          ( printf 'y\n%.0s' $(seq 1 50) ) | sdkmanager --install "emulator" "$pkg" > /tmp/emu-install.log 2>&1
+          echo "install=$(( $(date +%s) - t0 ))s"
+
+          if [ ! -x "$ANDROID_HOME/emulator/emulator" ]; then
+            echo "::error::emulator 安装失败"; tail -20 /tmp/emu-install.log; exit 1
+          fi
+          if [ ! -d "$ANDROID_HOME/system-images/android-${api}/${image}/${arch}" ]; then
+            echo "::error::系统镜像安装失败：$pkg"; tail -20 /tmp/emu-install.log; exit 1
+          fi
+
+          "$ANDROID_HOME/emulator/emulator" -accel-check 2>&1 | tail -3
+
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | avdmanager create avd -n ci -k "$pkg" -d "$profile" --force > /tmp/avd.log 2>&1
+          if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -qx ci; then
+            echo "::error::AVD 创建失败"; tail -20 /tmp/avd.log; exit 1
+          fi
+          echo "AVD 已创建：$profile / API $api"
+
+          t1=$(date +%s)
+          nohup "$ANDROID_HOME/emulator/emulator" -avd ci \
+            -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot \
+            > /tmp/emulator.log 2>&1 &
+
+          adb start-server > /dev/null 2>&1
+          for i in $(seq 1 90); do
+            adb devices 2>/dev/null | grep -q emulator && break
+            sleep 2
+          done
+          for i in $(seq 1 120); do
+            b=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            [ "$b" = "1" ] && break
+            sleep 2
+          done
+          echo "boot=$(( $(date +%s) - t1 ))s"
+          adb devices
+          adb shell wm size 2>&1
+
+          if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; then
+            echo "::error::模拟器未完成启动"
+            grep -iE "error|fail" /tmp/emulator.log | head -12
+            exit 1
+          fi
+          echo "::notice::模拟器就绪（API $api / $profile）"
           exit 0
 
       - name: Gradle tuning
