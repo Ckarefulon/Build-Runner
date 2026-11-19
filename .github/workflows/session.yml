@@ -241,6 +241,7 @@ jobs:
       # MEASURED end to end on ubuntu-latest: install 37s, AVD 1s, boot 39s,
       # screencap 1s — about 80s total.
       - name: Start emulator
+        id: emulator
         if: ${{ inputs.emulator != '' }}
         shell: bash
         env:
@@ -359,8 +360,31 @@ jobs:
           fi
           echo "缓存暂存：$(du -sh "$GITHUB_WORKSPACE/.ci-cache" 2>/dev/null | cut -f1)"
 
+          # Report what is worth saving so the save steps below can run right now
+          # instead of waiting for the job to end. A session can stay alive for
+          # hours, and `actions/cache` only saves in a post-job step — which meant
+          # a long session never populated the cache at all.
+          echo "fresh_sdk=$([ "$sdk_restored" = '1' ] && echo 0 || echo 1)" >> "$GITHUB_OUTPUT"
+          echo "fresh_avd=$([ "$snapshot_existed" = '1' ] && echo 0 || echo 1)" >> "$GITHUB_OUTPUT"
+
           echo "::notice::模拟器就绪（API $api / $profile）"
           exit 0
+
+      # Save immediately, not at job end. Without this a session that stays alive
+      # for hours never writes its cache, so the next session starts cold again.
+      - name: Save Android SDK cache now
+        if: ${{ inputs.emulator != '' && steps.emulator.outputs.fresh_sdk == '1' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-cache/android-sdk
+          key: br-emu-sdk-${{ runner.os }}-${{ steps.scope.outputs.emu }}
+
+      - name: Save AVD snapshot cache now
+        if: ${{ inputs.emulator != '' && steps.emulator.outputs.fresh_avd == '1' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-cache/avd
+          key: br-emu-avd-${{ runner.os }}-${{ steps.scope.outputs.emu }}
 
       - name: Gradle tuning
         shell: bash
