@@ -170,10 +170,7 @@ async function captureScreenshot() {
       output:
         `截图 ${payload.length} 字节（原始 ${png.length}）；${size.stdout.trim()}` +
         (imagePath ? `；已上传 ${imagePath}` : '；上传失败，无法回传图片'),
-        (imagePath ? `；已上传 ${imagePath}` : '；上传失败，无法回传图片'),
-      image: imagePath
-        ? { path: imagePath, bytes: png.length, repo: REPO }
-        : null,
+      image: imagePath ? { path: imagePath, bytes: payload.length, repo: REPO } : null,
     }
   } catch (error) {
     return { exitCode: 1, output: `截图失败：${error.message}`, image: null }
