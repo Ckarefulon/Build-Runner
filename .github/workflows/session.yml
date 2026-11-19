@@ -149,11 +149,13 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-            ~/.gradle/notifications
-          key: br-session-gradle-${{ runner.os }}-${{ steps.scope.outputs.scope }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          # Same key scheme as run.yml on purpose: a cache warmed by a `run`
+          # build is then usable here, and vice versa. Using a separate
+          # `br-session-gradle-` prefix meant this step never hit anything and
+          # silently restored nothing.
+          key: br-${{ runner.os }}-${{ steps.scope.outputs.scope }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
-            br-session-gradle-${{ runner.os }}-${{ steps.scope.outputs.scope }}-
-            br-session-gradle-${{ runner.os }}-
+            br-${{ runner.os }}-${{ steps.scope.outputs.scope }}-
 
       - name: Install Android debug keystore
         shell: bash
