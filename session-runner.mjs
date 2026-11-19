@@ -30,6 +30,29 @@ const POLL = Number(process.env.SESSION_POLL_SECONDS ?? 3)
 
 const API = `https://api.github.com/repos/${REPO}`
 
+/**
+ * Environment for every command and for the screenshot helper.
+ *
+ * The emulator is installed and started by an earlier workflow step using full
+ * paths, so `adb` is NOT on the default PATH here — the first screenshot attempt
+ * failed with "bash: adb: command not found". Pinning the SDK dirs makes both
+ * `adb` and the Gradle tooling reachable from any command the caller sends.
+ */
+const ANDROID_HOME = process.env.ANDROID_HOME || '/usr/local/lib/android/sdk'
+const ANDROID_BIN = [
+  `${ANDROID_HOME}/platform-tools`,
+  `${ANDROID_HOME}/emulator`,
+  `${ANDROID_HOME}/cmdline-tools/latest/bin`,
+].join(':')
+
+const CHILD_ENV = {
+  ...process.env,
+  ANDROID_HOME,
+  ANDROID_SDK_ROOT: ANDROID_HOME,
+  PATH: `${ANDROID_BIN}:${process.env.PATH ?? ''}`,
+  GRADLE_OPTS: `${process.env.GRADLE_OPTS ?? ''} -Dorg.gradle.caching=true`,
+}
+
 async function api(method, path, body) {
   const response = await fetch(`${API}${path}`, {
     method,
@@ -82,12 +105,13 @@ async function captureScreenshot() {
     const { stdout } = await run('bash', ['-c', 'adb exec-out screencap -p'], {
       maxBuffer: 64 * 1024 * 1024,
       encoding: 'buffer',
+      env: CHILD_ENV,
     })
     const png = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout)
     if (png.length < 100 || png[0] !== 0x89 || png[1] !== 0x50) {
       return { exitCode: 1, output: '截图数据不是有效 PNG（模拟器可能未就绪）', image: null }
     }
-    const size = await run('bash', ['-c', 'adb shell wm size'], { encoding: 'utf8' })
+    const size = await run('bash', ['-c', 'adb shell wm size'], { encoding: 'utf8', env: CHILD_ENV })
     return {
       exitCode: 0,
       durationSeconds: 0,
@@ -128,7 +152,7 @@ async function execute(command) {
     const { stdout, stderr } = await run(argv[0], argv[1], {
       shell: false,
       maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, GRADLE_OPTS: `${process.env.GRADLE_OPTS ?? ''} -Dorg.gradle.caching=true` },
+      env: CHILD_ENV,
     })
     return {
       exitCode: 0,
