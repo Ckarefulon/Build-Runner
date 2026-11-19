@@ -155,55 +155,6 @@ jobs:
             br-session-gradle-${{ runner.os }}-${{ steps.scope.outputs.scope }}-
             br-session-gradle-${{ runner.os }}-
 
-      - name: Restore Android SDK pieces
-        if: ${{ inputs.emulator != '' }}
-        uses: actions/cache@v4
-        with:
-          # The SDK lives outside the workspace, and `actions/cache` refuses
-          # absolute paths outside it ("Path Validation Error"). Cache a staging
-          # directory inside the workspace, then copy it into place.
-          path: .ci-cache/android-sdk
-          key: br-emu-sdk-${{ runner.os }}-${{ steps.scope.outputs.emu }}
-
-      - name: Install Android SDK pieces into place
-        if: ${{ inputs.emulator != '' }}
-        shell: bash
-        run: |
-          set +e
-          set +o pipefail
-          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          if [ -d "$GITHUB_WORKSPACE/.ci-cache/android-sdk/system-images" ]; then
-            cp -a "$GITHUB_WORKSPACE/.ci-cache/android-sdk/." "$ANDROID_HOME/" 2>/dev/null
-            echo "已从缓存恢复 SDK：$(du -sh "$GITHUB_WORKSPACE/.ci-cache/android-sdk" 2>/dev/null | cut -f1)"
-          else
-            echo "无 SDK 缓存，稍后从网络安装"
-          fi
-          rm -rf "$GITHUB_WORKSPACE/.ci-cache/android-sdk" 2>/dev/null
-          exit 0
-
-      - name: Restore AVD and emulator snapshot
-        if: ${{ inputs.emulator != '' }}
-        uses: actions/cache@v4
-        with:
-          path: .ci-cache/avd
-          key: br-emu-avd-${{ runner.os }}-${{ steps.scope.outputs.emu }}
-
-      - name: Install AVD into place
-        if: ${{ inputs.emulator != '' }}
-        shell: bash
-        run: |
-          set +e
-          set +o pipefail
-          export ANDROID_AVD_HOME="$HOME/.android/avd"
-          mkdir -p "$ANDROID_AVD_HOME"
-          if [ -d "$GITHUB_WORKSPACE/.ci-cache/avd" ]; then
-            cp -a "$GITHUB_WORKSPACE/.ci-cache/avd/." "$ANDROID_AVD_HOME/" 2>/dev/null
-            echo "已从缓存恢复 AVD"
-            ls "$ANDROID_AVD_HOME" 2>&1 | head -5
-          fi
-          rm -rf "$GITHUB_WORKSPACE/.ci-cache/avd" 2>/dev/null
-          exit 0
-
       - name: Install Android debug keystore
         shell: bash
         run: |
@@ -347,45 +298,18 @@ jobs:
             ls -la "$ANDROID_AVD_HOME/ci.avd/snapshots" 2>/dev/null | head -5
           fi
 
-          # Stage the cacheable bits for `actions/cache` to store at job end.
-          # The AVD is always staged (it may hold a fresh snapshot); the SDK is
-          # staged only when it was installed this run, otherwise it came from
-          # cache and re-saving it would be pointless churn.
-          mkdir -p "$GITHUB_WORKSPACE/.ci-cache"
-          cp -a "$ANDROID_AVD_HOME" "$GITHUB_WORKSPACE/.ci-cache/avd" 2>/dev/null
-          if [ ! -d "$ANDROID_HOME/system-images" ] || [ "$sdk_restored" != "1" ]; then
-            mkdir -p "$GITHUB_WORKSPACE/.ci-cache/android-sdk"
-            cp -a "$ANDROID_HOME/system-images" "$GITHUB_WORKSPACE/.ci-cache/android-sdk/" 2>/dev/null
-            cp -a "$ANDROID_HOME/emulator" "$GITHUB_WORKSPACE/.ci-cache/android-sdk/" 2>/dev/null
-          fi
-          echo "缓存暂存：$(du -sh "$GITHUB_WORKSPACE/.ci-cache" 2>/dev/null | cut -f1)"
-
-          # Report what is worth saving so the save steps below can run right now
-          # instead of waiting for the job to end. A session can stay alive for
-          # hours, and `actions/cache` only saves in a post-job step — which meant
-          # a long session never populated the cache at all.
-          echo "fresh_sdk=$([ "$sdk_restored" = '1' ] && echo 0 || echo 1)" >> "$GITHUB_OUTPUT"
-          echo "fresh_avd=$([ "$snapshot_existed" = '1' ] && echo 0 || echo 1)" >> "$GITHUB_OUTPUT"
+          # Note on caching the emulator state: measured and REJECTED.
+          # Restoring the SDK + AVD took 85s while saving only 29s of boot time
+          # (39s cold -> 10s from snapshot), a net loss of ~56s per session on a
+          # GitHub-hosted runner. Installing fresh (37s) plus a cold boot (39s)
+          # is cheaper. Only a self-hosted runner, where nothing needs restoring,
+          # actually makes the emulator feel "already running" — see SELF_HOSTED.md.
 
           echo "::notice::模拟器就绪（API $api / $profile）"
           exit 0
 
       # Save immediately, not at job end. Without this a session that stays alive
       # for hours never writes its cache, so the next session starts cold again.
-      - name: Save Android SDK cache now
-        if: ${{ inputs.emulator != '' && steps.emulator.outputs.fresh_sdk == '1' }}
-        uses: actions/cache/save@v4
-        with:
-          path: .ci-cache/android-sdk
-          key: br-emu-sdk-${{ runner.os }}-${{ steps.scope.outputs.emu }}
-
-      - name: Save AVD snapshot cache now
-        if: ${{ inputs.emulator != '' && steps.emulator.outputs.fresh_avd == '1' }}
-        uses: actions/cache/save@v4
-        with:
-          path: .ci-cache/avd
-          key: br-emu-avd-${{ runner.os }}-${{ steps.scope.outputs.emu }}
-
       - name: Gradle tuning
         shell: bash
         run: |
