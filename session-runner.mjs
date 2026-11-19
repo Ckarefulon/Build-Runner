@@ -13,7 +13,7 @@
  * caller and the runner never fight over the same ref, and nothing lands in the
  * repository's git history.
  */
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { writeFile, mkdtemp } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -97,6 +97,30 @@ function parseCommand(body) {
  */
 const SHOT_SENTINEL = 'BR-SCREENSHOT'
 
+/** `execFile` has no stdin option, so pipe bytes through `spawn` directly. */
+function runWithStdin(shellCommand, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('bash', ['-c', shellCommand], {
+      env: CHILD_ENV,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    const chunks = []
+    child.stdout.on('data', chunk => chunks.push(chunk))
+    child.on('error', reject)
+    child.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(`退出码 ${code}`))
+        return
+      }
+      resolve(Buffer.concat(chunks))
+    })
+    child.stdin.on('error', () => {
+      /* the child may exit before reading everything; the close handler decides */
+    })
+    child.stdin.end(input)
+  })
+}
+
 async function captureScreenshot() {
   try {
     // `exec-out` avoids the CRLF mangling that `adb shell` adds on Windows hosts.
@@ -111,6 +135,18 @@ async function captureScreenshot() {
     }
     const size = await run('bash', ['-c', 'adb shell wm size'], { encoding: 'utf8', env: CHILD_ENV })
 
+    // A full 1080x2400 PNG measured 1.37 MB — too heavy to put in a model's
+    // context on every look. Downscale to half resolution when ImageMagick is
+    // available; UI problems an agent cares about (clipped text, wrong colours,
+    // missing cards) survive that just fine.
+    let payload = png
+    try {
+      const shrunk = await runWithStdin('convert - -resize 50% png:-', png)
+      if (shrunk.length > 100 && shrunk[0] === 0x89) payload = shrunk
+    } catch {
+      // keep the original
+    }
+
     // A 1080x2400 screenshot is routinely 100-300 KB. Base64 would blow past the
     // 65,536-character issue-comment limit, so the PNG goes to a branch in this
     // repo and only its path travels in the comment. (The first attempt inlined
@@ -120,7 +156,7 @@ async function captureScreenshot() {
     try {
       await api('PUT', `/contents/${path}`, {
         message: `screenshot ${path}`,
-        content: png.toString('base64'),
+        content: payload.toString('base64'),
         branch: process.env.SESSION_BRANCH || 'main',
       })
       imagePath = path
@@ -131,7 +167,9 @@ async function captureScreenshot() {
     return {
       exitCode: imagePath ? 0 : 1,
       durationSeconds: 0,
-      output: `截图 ${png.length} 字节；${size.stdout.trim()}` +
+      output:
+        `截图 ${payload.length} 字节（原始 ${png.length}）；${size.stdout.trim()}` +
+        (imagePath ? `；已上传 ${imagePath}` : '；上传失败，无法回传图片'),
         (imagePath ? `；已上传 ${imagePath}` : '；上传失败，无法回传图片'),
       image: imagePath
         ? { path: imagePath, bytes: png.length, repo: REPO }
