@@ -114,6 +114,58 @@ jobs:
           fetch-depth: ${{ inputs.fetch_depth == '0' && '0' || inputs.fetch_depth }}
           persist-credentials: false
 
+      # ---------------------------------------------------------------- cache --
+      # Without these, every session starts from zero: re-download all Gradle
+      # dependencies, re-install the emulator, cold-boot it. Caching is what makes
+      # a session feel "already running" even when it was started minutes ago on a
+      # brand-new VM.
+      #
+      # Scope is per target repo so two projects cannot fight over one entry.
+      - name: Compute cache scope
+        id: scope
+        shell: bash
+        env:
+          IN_REPO: ${{ inputs.repo }}
+        run: |
+          set +e
+          set +o pipefail
+          s=$(printf '%s' "${IN_REPO:-this-repo}" | tr '/' '-' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)
+          echo "scope=$s" >> "$GITHUB_OUTPUT"
+          echo "cache scope: $s"
+          exit 0
+
+      - name: Restore Gradle caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.gradle/notifications
+          key: br-session-gradle-${{ runner.os }}-${{ steps.scope.outputs.scope }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            br-session-gradle-${{ runner.os }}-${{ steps.scope.outputs.scope }}-
+            br-session-gradle-${{ runner.os }}-
+
+      - name: Restore Android SDK pieces
+        if: ${{ inputs.emulator != '' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/system-images
+            /usr/local/lib/android/sdk/emulator
+          # Keyed by the emulator request: a different API level needs a
+          # different image, and mixing them would boot the wrong platform.
+          key: br-emu-sdk-${{ runner.os }}-${{ inputs.emulator }}
+
+      - name: Restore AVD and emulator snapshot
+        if: ${{ inputs.emulator != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/avd
+          # A saved snapshot turns a cold 39s boot into a few seconds. Restoring
+          # it is the closest thing to "the emulator was already running".
+          key: br-emu-avd-${{ runner.os }}-${{ inputs.emulator }}
+
       - name: Install Android debug keystore
         shell: bash
         run: |
@@ -190,15 +242,33 @@ jobs:
           "$ANDROID_HOME/emulator/emulator" -accel-check 2>&1 | tail -3
 
           mkdir -p "$ANDROID_AVD_HOME"
-          echo no | avdmanager create avd -n ci -k "$pkg" -d "$profile" --force > /tmp/avd.log 2>&1
-          if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -qx ci; then
-            echo "::error::AVD 创建失败"; tail -20 /tmp/avd.log; exit 1
+          snapshot_existed=0
+          [ -d "$ANDROID_AVD_HOME/ci.avd/snapshots" ] && snapshot_existed=1
+
+          # NEVER recreate an AVD that came from the cache: `--force` would wipe
+          # the saved snapshot, which is the entire reason we cache the AVD dir.
+          if [ -d "$ANDROID_AVD_HOME/ci.avd" ]; then
+            echo "复用缓存中的 AVD（快照：$snapshot_existed）"
+          else
+            echo no | avdmanager create avd -n ci -k "$pkg" -d "$profile" --force > /tmp/avd.log 2>&1
+            if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -qx ci; then
+              echo "::error::AVD 创建失败"; tail -20 /tmp/avd.log; exit 1
+            fi
+            echo "AVD 已创建：$profile / API $api"
           fi
-          echo "AVD 已创建：$profile / API $api"
 
           t1=$(date +%s)
-          nohup "$ANDROID_HOME/emulator/emulator" -avd ci \
-            -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot \
+          # Boot WITH snapshots when one was restored: quickboot resumes a booted
+          # system in seconds instead of repeating the whole boot sequence. On a
+          # cold cache, skip snapshots so a half-written one cannot wedge startup.
+          boot_flags="-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect"
+          if [ "$snapshot_existed" = "1" ]; then
+            echo "尝试从快照恢复…"
+            boot_flags="$boot_flags -snapshot ci_snap"
+          else
+            boot_flags="$boot_flags -no-snapshot"
+          fi
+          nohup "$ANDROID_HOME/emulator/emulator" -avd ci $boot_flags \
             > /tmp/emulator.log 2>&1 &
 
           adb start-server > /dev/null 2>&1
@@ -220,6 +290,15 @@ jobs:
             grep -iE "error|fail" /tmp/emulator.log | head -12
             exit 1
           fi
+
+          # Save a snapshot for the NEXT session. This is what makes a later
+          # session resume in seconds rather than cold-booting.
+          if [ "$snapshot_existed" != "1" ]; then
+            echo "保存快照供下次使用…"
+            adb emu avd snapshot save ci_snap 2>&1 | head -3
+            ls -la "$ANDROID_AVD_HOME/ci.avd/snapshots" 2>/dev/null | head -5
+          fi
+
           echo "::notice::模拟器就绪（API $api / $profile）"
           exit 0
 
