@@ -76,7 +76,10 @@ on:
         default: ''
 
 permissions:
-  contents: read
+  # `write` is needed for one thing only: uploading screenshots. A 1080x2400 PNG
+  # is ~1.4 MB, far past the 65,536-character issue-comment limit, so it is
+  # committed to this repo and only its path is posted back.
+  contents: write
   issues: write
 
 concurrency:
