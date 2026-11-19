@@ -141,18 +141,36 @@ jobs:
           [ -z "$e" ] && e=none
           echo "emu=$e" >> "$GITHUB_OUTPUT"
           echo "emulator cache key part: $e"
+
+          # Gradle cache paths MUST be byte-identical to the ones run.yml uses.
+          #
+          # `actions/cache` derives a "version" from the `path` list and only
+          # restores entries with the SAME version. Two workflows naming the same
+          # files differently therefore never share a cache — which is exactly why
+          # this lookup kept reporting "Cache not found" even though the key
+          # prefix matched and the entry sat on the same branch.
+          #
+          # run.yml deliberately narrows the paths (the whole ~/.gradle/caches
+          # archives to ~600 MB and costs ~16s just to unpack; file-hashes,
+          # worker locks and journal-1 are per-run scratch that can never be
+          # reused). Mirroring that list keeps both workflows on one cache.
+          {
+            echo "gradle_paths<<__BR_PATHS__"
+            echo "$HOME/.gradle/caches/modules-2"
+            echo "$HOME/.gradle/caches/*/transforms"
+            echo "$HOME/.gradle/caches/*/kotlin-dsl"
+            echo "$HOME/.gradle/wrapper"
+            echo "__BR_PATHS__"
+          } >> "$GITHUB_OUTPUT"
+          echo "gradle 缓存路径已按 run.yml 对齐"
           exit 0
 
       - name: Restore Gradle caches
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          # Same key scheme as run.yml on purpose: a cache warmed by a `run`
-          # build is then usable here, and vice versa. Using a separate
-          # `br-session-gradle-` prefix meant this step never hit anything and
-          # silently restored nothing.
+          # Comes from the step above so the path list stays byte-identical to
+          # run.yml — that identity is what makes the version hash match.
+          path: ${{ steps.scope.outputs.gradle_paths }}
           key: br-${{ runner.os }}-${{ steps.scope.outputs.scope }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             br-${{ runner.os }}-${{ steps.scope.outputs.scope }}-
