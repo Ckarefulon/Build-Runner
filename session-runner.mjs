@@ -98,8 +98,6 @@ function parseCommand(body) {
 const SHOT_SENTINEL = 'BR-SCREENSHOT'
 
 async function captureScreenshot() {
-  const dir = await mkdtemp(join(tmpdir(), 'br-shot-'))
-  const file = join(dir, 'shot.png')
   try {
     // `exec-out` avoids the CRLF mangling that `adb shell` adds on Windows hosts.
     const { stdout } = await run('bash', ['-c', 'adb exec-out screencap -p'], {
@@ -112,20 +110,35 @@ async function captureScreenshot() {
       return { exitCode: 1, output: '截图数据不是有效 PNG（模拟器可能未就绪）', image: null }
     }
     const size = await run('bash', ['-c', 'adb shell wm size'], { encoding: 'utf8', env: CHILD_ENV })
+
+    // A 1080x2400 screenshot is routinely 100-300 KB. Base64 would blow past the
+    // 65,536-character issue-comment limit, so the PNG goes to a branch in this
+    // repo and only its path travels in the comment. (The first attempt inlined
+    // it and the write silently failed, which is why no result appeared at all.)
+    const path = `.build-runner/sessions/shot-${Date.now()}.png`
+    let imagePath = null
+    try {
+      await api('PUT', `/contents/${path}`, {
+        message: `screenshot ${path}`,
+        content: png.toString('base64'),
+        branch: process.env.SESSION_BRANCH || 'main',
+      })
+      imagePath = path
+    } catch (error) {
+      console.log(`上传截图失败：${error.message}`)
+    }
+
     return {
-      exitCode: 0,
+      exitCode: imagePath ? 0 : 1,
       durationSeconds: 0,
-      output: `截图 ${png.length} 字节；${size.stdout.trim()}`,
-      image: { mimeType: 'image/png', data: png.toString('base64'), bytes: png.length },
+      output: `截图 ${png.length} 字节；${size.stdout.trim()}` +
+        (imagePath ? `；已上传 ${imagePath}` : '；上传失败，无法回传图片'),
+      image: imagePath
+        ? { path: imagePath, bytes: png.length, repo: REPO }
+        : null,
     }
   } catch (error) {
-    return {
-      exitCode: 1,
-      output: `截图失败：${error.message}`,
-      image: null,
-    }
-  } finally {
-    // Nothing to clean: the buffer never hits disk.
+    return { exitCode: 1, output: `截图失败：${error.message}`, image: null }
   }
 }
 
