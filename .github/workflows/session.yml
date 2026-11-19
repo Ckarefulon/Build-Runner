@@ -74,6 +74,12 @@ on:
           Empty = no emulator.
         required: false
         default: ''
+      cjk_fonts:
+        description: >-
+          Install Chinese/Japanese/Korean fonts. Needed for offscreen rendering:
+          without them every CJK glyph is a box. ~146s.
+        required: false
+        default: 'false'
 
 permissions:
   # `write` is needed for one thing only: uploading screenshots. A 1080x2400 PNG
@@ -330,6 +336,36 @@ jobs:
 
       # Save immediately, not at job end. Without this a session that stays alive
       # for hours never writes its cache, so the next session starts cold again.
+      - name: Install CJK fonts for offscreen rendering
+        if: ${{ inputs.cjk_fonts == 'true' }}
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          # Offscreen Compose rendering draws with whatever fonts the JVM can see.
+          # The stock ubuntu runner has 53 fonts and NOT ONE CJK face, so every
+          # Chinese glyph renders as a □ box — the screenshots look broken even
+          # when the layout is perfect. MEASURED: ~146s to install.
+          #
+          # `apt-get install` alone fails on a fresh image because the package
+          # lists are empty; `update` must run first. Both are quiet to keep the
+          # log readable.
+          t0=$(date +%s)
+          if fc-list :lang=zh 2>/dev/null | grep -q .; then
+            echo "CJK 字体已存在：$(fc-list :lang=zh 2>/dev/null | wc -l) 个"
+          else
+            sudo apt-get update -qq > /tmp/font.log 2>&1
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fonts-noto-cjk >> /tmp/font.log 2>&1
+            fc-cache -f > /dev/null 2>&1
+            n=$(fc-list :lang=zh 2>/dev/null | wc -l | tr -d ' ')
+            echo "CJK 字体数：$n（耗时 $(( $(date +%s) - t0 ))s）"
+            if [ "$n" = "0" ]; then
+              echo "::warning::中文字体安装失败，渲染图里的中文会显示成方块"
+              tail -5 /tmp/font.log
+            fi
+          fi
+          exit 0
+
       - name: Gradle tuning
         shell: bash
         run: |
