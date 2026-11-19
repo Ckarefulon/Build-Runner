@@ -126,12 +126,21 @@ jobs:
         shell: bash
         env:
           IN_REPO: ${{ inputs.repo }}
+          IN_EMULATOR: ${{ inputs.emulator }}
         run: |
           set +e
           set +o pipefail
           s=$(printf '%s' "${IN_REPO:-this-repo}" | tr '/' '-' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)
           echo "scope=$s" >> "$GITHUB_OUTPUT"
           echo "cache scope: $s"
+
+          # Cache keys may not contain commas, and the emulator input is JSON
+          # (`{"api":34,...}`) — so sanitize it into a plain token. Using the raw
+          # JSON failed with "Key Validation Error: ... cannot contain commas".
+          e=$(printf '%s' "${IN_EMULATOR:-none}" | tr -cd 'A-Za-z0-9._-' | cut -c1-60)
+          [ -z "$e" ] && e=none
+          echo "emu=$e" >> "$GITHUB_OUTPUT"
+          echo "emulator cache key part: $e"
           exit 0
 
       - name: Restore Gradle caches
@@ -154,7 +163,7 @@ jobs:
           # absolute paths outside it ("Path Validation Error"). Cache a staging
           # directory inside the workspace, then copy it into place.
           path: .ci-cache/android-sdk
-          key: br-emu-sdk-${{ runner.os }}-${{ inputs.emulator }}
+          key: br-emu-sdk-${{ runner.os }}-${{ steps.scope.outputs.emu }}
 
       - name: Install Android SDK pieces into place
         if: ${{ inputs.emulator != '' }}
@@ -177,7 +186,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ci-cache/avd
-          key: br-emu-avd-${{ runner.os }}-${{ inputs.emulator }}
+          key: br-emu-avd-${{ runner.os }}-${{ steps.scope.outputs.emu }}
 
       - name: Install AVD into place
         if: ${{ inputs.emulator != '' }}
