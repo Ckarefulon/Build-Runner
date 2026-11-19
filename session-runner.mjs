@@ -114,20 +114,25 @@ function parseCommand(body) {
  * One rolling tag is reused so sessions do not litter the releases page.
  */
 async function uploadArtifacts(rawPaths, id) {
-  // A sentinel lets the caller say "whatever PNGs this command just produced",
+  // A sentinel lets the caller say "whatever images this command just produced",
   // without having to know the project's output layout in advance.
+  //
+  // Restricted to `build/` and `*/build/`: a fresh checkout gives every tracked
+  // file a new mtime, so a plain time filter picked up the repository's own icon
+  // assets (web/…/icon-512.png, app/…/qr/*.png) instead of the rendered screens.
   if (String(rawPaths).trim() === 'AUTO_PNG') {
     try {
       const { stdout } = await run(
         'bash',
         [
           '-c',
-          'find . -name "*.png" -newermt "-15 minutes" -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | head -30',
+          'find . -path "*/build/*" -name "*.png" -not -path "*/node_modules/*" -not -path "./.git/*" 2>/dev/null | head -40',
         ],
         { env: CHILD_ENV, encoding: 'utf8' }
       )
       rawPaths = stdout
-      console.log(`自动收集到 PNG：${stdout.trim().split('\n').filter(Boolean).length} 个`)
+      const count = stdout.trim().split('\n').filter(Boolean).length
+      console.log(`自动收集到 build/ 下 PNG：${count} 个`)
     } catch {
       return []
     }
