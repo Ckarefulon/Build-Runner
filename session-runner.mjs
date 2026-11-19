@@ -114,6 +114,25 @@ function parseCommand(body) {
  * One rolling tag is reused so sessions do not litter the releases page.
  */
 async function uploadArtifacts(rawPaths, id) {
+  // A sentinel lets the caller say "whatever PNGs this command just produced",
+  // without having to know the project's output layout in advance.
+  if (String(rawPaths).trim() === 'AUTO_PNG') {
+    try {
+      const { stdout } = await run(
+        'bash',
+        [
+          '-c',
+          'find . -name "*.png" -newermt "-15 minutes" -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | head -30',
+        ],
+        { env: CHILD_ENV, encoding: 'utf8' }
+      )
+      rawPaths = stdout
+      console.log(`自动收集到 PNG：${stdout.trim().split('\n').filter(Boolean).length} 个`)
+    } catch {
+      return []
+    }
+  }
+
   const paths = String(rawPaths)
     .split('\n')
     .map(line => line.trim())
