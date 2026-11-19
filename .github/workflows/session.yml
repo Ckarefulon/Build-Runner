@@ -150,21 +150,50 @@ jobs:
         if: ${{ inputs.emulator != '' }}
         uses: actions/cache@v4
         with:
-          path: |
-            /usr/local/lib/android/sdk/system-images
-            /usr/local/lib/android/sdk/emulator
-          # Keyed by the emulator request: a different API level needs a
-          # different image, and mixing them would boot the wrong platform.
+          # The SDK lives outside the workspace, and `actions/cache` refuses
+          # absolute paths outside it ("Path Validation Error"). Cache a staging
+          # directory inside the workspace, then copy it into place.
+          path: .ci-cache/android-sdk
           key: br-emu-sdk-${{ runner.os }}-${{ inputs.emulator }}
+
+      - name: Install Android SDK pieces into place
+        if: ${{ inputs.emulator != '' }}
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          if [ -d "$GITHUB_WORKSPACE/.ci-cache/android-sdk/system-images" ]; then
+            cp -a "$GITHUB_WORKSPACE/.ci-cache/android-sdk/." "$ANDROID_HOME/" 2>/dev/null
+            echo "已从缓存恢复 SDK：$(du -sh "$GITHUB_WORKSPACE/.ci-cache/android-sdk" 2>/dev/null | cut -f1)"
+          else
+            echo "无 SDK 缓存，稍后从网络安装"
+          fi
+          rm -rf "$GITHUB_WORKSPACE/.ci-cache/android-sdk" 2>/dev/null
+          exit 0
 
       - name: Restore AVD and emulator snapshot
         if: ${{ inputs.emulator != '' }}
         uses: actions/cache@v4
         with:
-          path: ~/.android/avd
-          # A saved snapshot turns a cold 39s boot into a few seconds. Restoring
-          # it is the closest thing to "the emulator was already running".
+          path: .ci-cache/avd
           key: br-emu-avd-${{ runner.os }}-${{ inputs.emulator }}
+
+      - name: Install AVD into place
+        if: ${{ inputs.emulator != '' }}
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          if [ -d "$GITHUB_WORKSPACE/.ci-cache/avd" ]; then
+            cp -a "$GITHUB_WORKSPACE/.ci-cache/avd/." "$ANDROID_AVD_HOME/" 2>/dev/null
+            echo "已从缓存恢复 AVD"
+            ls "$ANDROID_AVD_HOME" 2>&1 | head -5
+          fi
+          rm -rf "$GITHUB_WORKSPACE/.ci-cache/avd" 2>/dev/null
+          exit 0
 
       - name: Install Android debug keystore
         shell: bash
@@ -223,14 +252,23 @@ jobs:
           pkg="system-images;android-${api};${image};${arch}"
           echo "emulator package: $pkg  profile: $profile"
 
+          # Did the SDK come from cache? Decides whether it needs re-staging.
+          sdk_restored=0
+          [ -d "$ANDROID_HOME/system-images/android-${api}/${image}/${arch}" ] && [ -x "$ANDROID_HOME/emulator/emulator" ] && sdk_restored=1
+          echo "SDK 已就位（来自缓存）：$sdk_restored"
+
           # Hardware acceleration. Without the group fix this is denied and the
           # emulator silently degrades to unusably slow software rendering.
           sudo -n chmod 666 /dev/kvm 2>/dev/null || true
           echo "kvm: $(ls -l /dev/kvm 2>&1)"
 
           t0=$(date +%s)
-          ( printf 'y\n%.0s' $(seq 1 50) ) | sdkmanager --install "emulator" "$pkg" > /tmp/emu-install.log 2>&1
-          echo "install=$(( $(date +%s) - t0 ))s"
+          if [ "$sdk_restored" = "1" ]; then
+            echo "install=0s（已由缓存提供，跳过下载）"
+          else
+            ( printf 'y\n%.0s' $(seq 1 50) ) | sdkmanager --install "emulator" "$pkg" > /tmp/emu-install.log 2>&1
+            echo "install=$(( $(date +%s) - t0 ))s"
+          fi
 
           if [ ! -x "$ANDROID_HOME/emulator/emulator" ]; then
             echo "::error::emulator 安装失败"; tail -20 /tmp/emu-install.log; exit 1
@@ -298,6 +336,19 @@ jobs:
             adb emu avd snapshot save ci_snap 2>&1 | head -3
             ls -la "$ANDROID_AVD_HOME/ci.avd/snapshots" 2>/dev/null | head -5
           fi
+
+          # Stage the cacheable bits for `actions/cache` to store at job end.
+          # The AVD is always staged (it may hold a fresh snapshot); the SDK is
+          # staged only when it was installed this run, otherwise it came from
+          # cache and re-saving it would be pointless churn.
+          mkdir -p "$GITHUB_WORKSPACE/.ci-cache"
+          cp -a "$ANDROID_AVD_HOME" "$GITHUB_WORKSPACE/.ci-cache/avd" 2>/dev/null
+          if [ ! -d "$ANDROID_HOME/system-images" ] || [ "$sdk_restored" != "1" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/.ci-cache/android-sdk"
+            cp -a "$ANDROID_HOME/system-images" "$GITHUB_WORKSPACE/.ci-cache/android-sdk/" 2>/dev/null
+            cp -a "$ANDROID_HOME/emulator" "$GITHUB_WORKSPACE/.ci-cache/android-sdk/" 2>/dev/null
+          fi
+          echo "缓存暂存：$(du -sh "$GITHUB_WORKSPACE/.ci-cache" 2>/dev/null | cut -f1)"
 
           echo "::notice::模拟器就绪（API $api / $profile）"
           exit 0
