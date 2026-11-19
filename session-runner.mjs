@@ -65,6 +65,47 @@ function parseCommand(body) {
   return { id, command: fence[1].replace(/\n$/, '') }
 }
 
+/**
+ * Screenshot requests arrive as a command whose first token is a sentinel, so no
+ * separate channel is needed. The PNG is returned base64 in the result comment:
+ * a UI screenshot is typically 15-80 KB, which comfortably fits an issue comment
+ * (65,536 char body limit ~ 48 KB of bytes), and it avoids a second round trip
+ * through a branch or artifact.
+ */
+const SHOT_SENTINEL = 'BR-SCREENSHOT'
+
+async function captureScreenshot() {
+  const dir = await mkdtemp(join(tmpdir(), 'br-shot-'))
+  const file = join(dir, 'shot.png')
+  try {
+    // `exec-out` avoids the CRLF mangling that `adb shell` adds on Windows hosts.
+    const { stdout } = await run('bash', ['-c', 'adb exec-out screencap -p'], {
+      maxBuffer: 64 * 1024 * 1024,
+      encoding: 'buffer',
+    })
+    const png = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout)
+    if (png.length < 100 || png[0] !== 0x89 || png[1] !== 0x50) {
+      return { exitCode: 1, output: '截图数据不是有效 PNG（模拟器可能未就绪）', image: null }
+    }
+    const size = await run('bash', ['-c', 'adb shell wm size'], { encoding: 'utf8' })
+    return {
+      exitCode: 0,
+      durationSeconds: 0,
+      output: `截图 ${png.length} 字节；${size.stdout.trim()}`,
+      image: { mimeType: 'image/png', data: png.toString('base64'), bytes: png.length },
+    }
+  } catch (error) {
+    return {
+      exitCode: 1,
+      output: `截图失败：${error.message}`,
+      image: null,
+    }
+  } finally {
+    // Nothing to clean: the buffer never hits disk.
+  }
+}
+
+/** Wrap the payload in a comment the caller can parse. */
 async function postResult(id, payload) {
   const json = JSON.stringify(payload, null, 2)
   const body = `BR-RESULT:${id}\n\`\`\`json\n${json}\n\`\`\``
@@ -134,11 +175,14 @@ async function main() {
     idle = 0
 
     for (const item of pending) {
-      console.log(`\n===== 执行 ${item.id} =====`)
-      console.log(item.command.split('\n').slice(0, 20).join('\n'))
-      const result = await execute(item.command)
-      console.log(`----- 退出码 ${result.exitCode}，${result.durationSeconds.toFixed(1)}s -----`)
-      console.log(result.output.slice(-2000))
+      const isShot = item.command.trim().startsWith(SHOT_SENTINEL)
+      console.log(`\n===== ${isShot ? '截图' : '执行'} ${item.id} =====`)
+      if (!isShot) console.log(item.command.split('\n').slice(0, 20).join('\n'))
+
+      const result = isShot ? await captureScreenshot() : await execute(item.command)
+      console.log(`----- 退出码 ${result.exitCode} -----`)
+      console.log(String(result.output ?? '').slice(-2000))
+
       try {
         await postResult(item.id, result)
         console.log(`结果已回写 ${item.id}`)
