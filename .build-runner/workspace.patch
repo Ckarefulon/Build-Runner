@@ -920,10 +920,10 @@ index 5840d6b5..9caea58e 100644
      }
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
 new file mode 100644
-index 00000000..7a788c85
+index 00000000..75da2932
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
-@@ -0,0 +1,636 @@
+@@ -0,0 +1,638 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +import com.xjtu.toolbox.attendance.WaterType
@@ -1084,7 +1084,8 @@ index 00000000..7a788c85
 +                    SmartBlock(
 +                        module = SmartModule.EXAM,
 +                        label = "考试",
-+                        title = e.exam.courseName,
++                        // 教务偶尔给空课名：这一行是标题，空着就等于这个块没有主语
++                        title = e.exam.courseName.ifBlank { "考试" },
 +                        detail = examDetail(e),
 +                        status = e.label,
 +                        rank = SmartRank.P2,
@@ -1177,7 +1178,8 @@ index 00000000..7a788c85
 +        return SmartBlock(
 +            module = SmartModule.TODO,
 +            label = if (left <= TODO_P0_MIN) "快截止" else "待办",
-+            title = todo.title,
++            // 学校那一条没有标题时给一个能读的主语，别在桌面上留一行空标题
++            title = todo.title.ifBlank { todo.source.ifBlank { "待办" } },
 +            detail = todo.source.ifBlank { null },
 +            status = deadlineText(facts, todo),
 +            statusColor = if (left <= TODO_P0_MIN) COLOR_ABSENT else null,
@@ -1808,10 +1810,10 @@ index 00000000..b0a14b5e
 +}
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt
 new file mode 100644
-index 00000000..851c781b
+index 00000000..9250fd57
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,170 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +/**
@@ -1936,9 +1938,10 @@ index 00000000..851c781b
 +        // 排版前把长文案收一遍（见 TITLE_MAX 那组常量的注释）。
 +        // 状态行按**整句**收：它已经把「结论 + 时效」拼成一句，分开收会把「查于 10:12」截掉，
 +        // 那就等于又变回一句没有时刻的断言。
++        // 标题留空也不许炸：脏数据（教务给空课名）上面已经各自兜过一层，这里是最后一道。
 +        block = block.copy(
 +            label = clamp(block.label, DETAIL_MAX),
-+            title = clamp(block.title, TITLE_MAX)!!,
++            title = clamp(block.title, TITLE_MAX).orEmpty(),
 +            detail = clamp(block.detail, DETAIL_MAX),
 +            status = clamp(block.statusLine, STATUS_MAX),
 +            meta = null,
@@ -3443,10 +3446,10 @@ index 00000000..116182a9
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
 new file mode 100644
-index 00000000..b4ad2337
+index 00000000..34231543
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,150 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.widget.smart.SmartLayout
@@ -3566,6 +3569,20 @@ index 00000000..b4ad2337
 +        val clamped = SmartLayout.clamp(long, SmartLayout.TITLE_MAX)!!
 +        assertEquals(SmartLayout.TITLE_MAX, clamped.length)
 +        assertTrue("截断了就要让人看出来", clamped.endsWith("…"))
++    }
++
++    @Test
++    fun `空标题也不许炸`() {
++        // 教务偶尔给空课名之类的脏数据：卡片进程里抛出去就是「加载失败」，这里只许退化成空行
++        val block = com.xjtu.toolbox.widget.smart.SmartBlock(
++            module = com.xjtu.toolbox.widget.smart.SmartModule.ATTENDANCE,
++            label = null,
++            title = "",
++            route = com.xjtu.toolbox.nav.AppRoute.Attendance,
++        )
++        val plan = SmartLayout.plan(com.xjtu.toolbox.widget.smart.SmartCard(block = block), SmartLayout.Form.COMPACT)
++        assertEquals("", plan.block.title)
++        assertTrue(plan.heightDp <= SmartLayout.CARD_HEIGHT_DP)
 +    }
 +
 +    @Test
