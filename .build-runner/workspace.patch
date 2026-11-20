@@ -2892,6 +2892,147 @@ index 00000000..cba03caf
 +    </LinearLayout>
 +
 +</LinearLayout>
+diff --git a/app/src/main/res/layout/widget_smart_preview.xml b/app/src/main/res/layout/widget_smart_preview.xml
+new file mode 100644
+index 00000000..6f56e5dc
+--- /dev/null
++++ b/app/src/main/res/layout/widget_smart_preview.xml
+@@ -0,0 +1,135 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  智能卡片在选择器里的**静态预览**（`android:previewLayout`）。
++
++  为什么单独做一个文件：真正的 `widget_smart_compact.xml` 里每一行都要运行时才填，
++  在选择器里预览时全是 GONE —— 用户在小组件列表里看到的是一张**空白卡**，根本认不出是什么。
++  这个文件把一屏真实内容写死在里面，只给选择器看，运行时不碰它
++  （运行时用的是 compact / wide 两套，`initialLayout` 也是 compact）。
++
++  里面的 `android:tint` 是安全的：这个布局只会被桌面**inflate** 一次，不会被 RemoteViews
++  的动作改到（`setInt("setColorFilter")` 那套只作用于运行时的两套布局）。
++-->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:background="@drawable/bg_schedule_widget"
++    android:orientation="vertical"
++    android:paddingHorizontal="14dp"
++    android:paddingVertical="8dp">
++
++    <TextView
++        android:layout_width="wrap_content"
++        android:layout_height="15dp"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:text="上课中"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="10sp" />
++
++    <TextView
++        android:layout_width="match_parent"
++        android:layout_height="22dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:text="高等数学(甲)"
++        android:textColor="@color/widget_on_surface"
++        android:textSize="17sp"
++        android:textStyle="bold" />
++
++    <TextView
++        android:layout_width="match_parent"
++        android:layout_height="18dp"
++        android:layout_marginTop="2dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:text="已刷卡 · 待结算"
++        android:textColor="#FF2E6BE6"
++        android:textSize="12sp"
++        android:textStyle="bold" />
++
++    <TextView
++        android:layout_width="match_parent"
++        android:layout_height="15dp"
++        android:layout_marginTop="2dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:text="还剩 35 分钟"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="11sp" />
++
++    <ImageView
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:layout_marginTop="6dp"
++        android:background="@color/widget_divider"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no" />
++
++    <TextView
++        android:layout_width="match_parent"
++        android:layout_height="15dp"
++        android:layout_marginTop="6dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:text="余额 ¥128.60"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="10sp" />
++
++    <TextView
++        android:layout_width="match_parent"
++        android:layout_height="0dp"
++        android:layout_weight="1"
++        android:importantForAccessibility="no" />
++
++    <ImageView
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:background="@color/widget_divider"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no" />
++
++    <LinearLayout
++        android:layout_width="match_parent"
++        android:layout_height="24dp"
++        android:layout_marginTop="4dp"
++        android:gravity="center_vertical"
++        android:orientation="horizontal">
++
++        <ImageView
++            android:layout_width="20dp"
++            android:layout_height="20dp"
++            android:contentDescription="考勤"
++            android:scaleType="fitCenter"
++            android:src="@drawable/ic_widget_attendance"
++            android:tint="@color/widget_on_surface" />
++
++        <ImageView
++            android:layout_width="20dp"
++            android:layout_height="20dp"
++            android:layout_marginStart="12dp"
++            android:contentDescription="扫码"
++            android:scaleType="fitCenter"
++            android:src="@drawable/ic_widget_qr"
++            android:tint="@color/widget_on_surface" />
++
++        <TextView
++            android:layout_width="0dp"
++            android:layout_height="1dp"
++            android:layout_weight="1"
++            android:importantForAccessibility="no" />
++
++        <ImageView
++            android:layout_width="20dp"
++            android:layout_height="20dp"
++            android:contentDescription="刷新"
++            android:scaleType="fitCenter"
++            android:src="@drawable/ic_widget_refresh"
++            android:tint="@color/widget_on_surface_secondary" />
++    </LinearLayout>
++
++</LinearLayout>
 diff --git a/app/src/main/res/layout/widget_smart_wide.xml b/app/src/main/res/layout/widget_smart_wide.xml
 new file mode 100644
 index 00000000..a1fcb68c
@@ -3102,10 +3243,10 @@ index 00000000..a1fcb68c
 +
 +</LinearLayout>
 diff --git a/app/src/main/res/xml/smart_widget_info.xml b/app/src/main/res/xml/smart_widget_info.xml
-index ed54650e..74227feb 100644
+index ed54650e..f1ca900d 100644
 --- a/app/src/main/res/xml/smart_widget_info.xml
 +++ b/app/src/main/res/xml/smart_widget_info.xml
-@@ -1,4 +1,14 @@
+@@ -1,4 +1,16 @@
  <?xml version="1.0" encoding="utf-8"?>
 +<!--
 +  智能卡片的元数据。
@@ -3113,21 +3254,23 @@ index ed54650e..74227feb 100644
 +  `minHeight=110dp` 是**上限不是配额**（§7.3）：布局那边把主区做成 0dp + weight=1，
 +  内容再多也只会被裁，底栏永远留在卡内；能不能放得下由 SmartLayout 的高度预算先算清楚。
 +
-+  `resizeMode="horizontal|vertical"` ⇒ 用户能把它拖成 4×2、2×4，所以两套初始布局各一份，
++  `resizeMode="horizontal|vertical"` ⇒ 用户能把它拖成 4×2、2×4，所以两套运行时布局各一份，
 +  `SmartWidgetProvider.onAppWidgetOptionsChanged` 会按实例的实际宽度在紧凑/宽之间切换。
-+  给系统预览（选择器里那张图）用紧凑那份，因为默认就是 2×2。
++
++  `previewLayout` 用**另一份静态布局**：运行时那两套的内容全是填进去的，在选择器里预览时
++  一个字段都没有，用户看到的会是一张空白卡。`initialLayout` 仍然是运行时那套。
 +-->
  <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
      android:label="@string/smart_widget_name"
      android:description="@string/smart_widget_desc"
-@@ -7,7 +17,7 @@
+@@ -7,7 +19,7 @@
      android:targetCellWidth="2"
      android:targetCellHeight="2"
      android:updatePeriodMillis="1800000"
 -    android:initialLayout="@layout/widget_smart"
 -    android:previewLayout="@layout/widget_smart"
 +    android:initialLayout="@layout/widget_smart_compact"
-+    android:previewLayout="@layout/widget_smart_compact"
++    android:previewLayout="@layout/widget_smart_preview"
      android:resizeMode="horizontal|vertical"
      android:widgetCategory="home_screen" />
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBlockTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBlockTest.kt
