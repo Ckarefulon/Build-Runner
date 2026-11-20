@@ -230,10 +230,10 @@ index 17ccbe87..b9aa6761 100644
              WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                  "attendance_widget_sync",
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
-index d95decf7..645dfef0 100644
+index d95decf7..dcaa7b3a 100644
 --- a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
-@@ -7,119 +7,71 @@ import android.appwidget.AppWidgetProvider
+@@ -7,119 +7,72 @@ import android.appwidget.AppWidgetProvider
  import android.content.ComponentName
  import android.content.Context
  import android.content.Intent
@@ -241,7 +241,7 @@ index d95decf7..645dfef0 100644
  import android.widget.RemoteViews
  import com.xjtu.toolbox.MainActivity
  import com.xjtu.toolbox.R
--import com.xjtu.toolbox.account.restoreIfNeeded
+ import com.xjtu.toolbox.account.restoreIfNeeded
  import com.xjtu.toolbox.attendance.AttendanceRecordStore
 -import com.xjtu.toolbox.attendance.WaterType
 -import com.xjtu.toolbox.nav.AppRoute
@@ -397,12 +397,9 @@ index d95decf7..645dfef0 100644
      )
  
      fun requestUpdate(context: Context) {
-@@ -128,65 +80,72 @@ object SmartWidgetUpdater {
- 
-     internal fun update(context: Context, manager: AppWidgetManager, ids: IntArray) {
+@@ -130,63 +83,70 @@ object SmartWidgetUpdater {
          if (ids.isEmpty()) return
--        com.xjtu.toolbox.account.AccountContext.restoreIfNeeded()
-+        com.xjtu.toolbox.account.restoreIfNeeded()
+         com.xjtu.toolbox.account.AccountContext.restoreIfNeeded()
          val now = LocalDateTime.now(CampusZoneId)
 +        val facts = factsOf(context, now)
 +        val card = SmartArbiter.card(facts)
@@ -518,7 +515,7 @@ index d95decf7..645dfef0 100644
      }
  
      /**
-@@ -196,13 +155,13 @@ object SmartWidgetUpdater {
+@@ -196,13 +156,13 @@ object SmartWidgetUpdater {
       * **卡片里绝不登录考勤站点**：小组件会随桌面反复刷新、还会被系统在后台拉起，
       * 为此反复登录既慢又容易被判异常访问。
       *
@@ -536,7 +533,7 @@ index d95decf7..645dfef0 100644
          val termCode = ScheduleWidgetUpdater.currentTermCode(context) ?: return null
          val account = com.xjtu.toolbox.account.AccountContext.activeAccountId
              ?: com.xjtu.toolbox.account.AccountStore().activeAccountId()
-@@ -217,131 +176,162 @@ object SmartWidgetUpdater {
+@@ -217,131 +177,162 @@ object SmartWidgetUpdater {
          return attendanceMarksOf(shard.records)
      }
  
@@ -805,7 +802,7 @@ index d95decf7..645dfef0 100644
          val at = boundaries.filter { it > nowMinute }.minOrNull()
              ?.let { now.toLocalDate().atStartOfDay().plusMinutes(it.toLong()) }
              ?: now.toLocalDate().plusDays(1).atStartOfDay()
-@@ -350,6 +340,7 @@ object SmartWidgetUpdater {
+@@ -350,6 +341,7 @@ object SmartWidgetUpdater {
          context.getSystemService(AlarmManager::class.java)
              ?.setWindow(AlarmManager.RTC, millis, 2 * 60_000L, refreshIntent(context))
      }
@@ -813,7 +810,7 @@ index d95decf7..645dfef0 100644
      internal fun cancel(context: Context) {
          context.getSystemService(AlarmManager::class.java)?.cancel(refreshIntent(context))
      }
-@@ -364,7 +355,7 @@ object SmartWidgetUpdater {
+@@ -364,7 +356,7 @@ object SmartWidgetUpdater {
       * 卡片上那颗「刷新」：发一条广播给小组件自己。
       *
       * **不打开 App**：点一下只做「立刻问一次学校 + 重画卡片」，这是用户想要「马上知道」时
@@ -822,7 +819,7 @@ index d95decf7..645dfef0 100644
       */
      private fun refreshNowIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
          context, RequestCodes.SMART_WIDGET_REFRESH_NOW,
-@@ -372,18 +363,37 @@ object SmartWidgetUpdater {
+@@ -372,18 +364,37 @@ object SmartWidgetUpdater {
          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
      )
  
@@ -867,7 +864,7 @@ index d95decf7..645dfef0 100644
  class SmartWidgetProvider : AppWidgetProvider() {
      private fun updateAsync(context: Context, ids: () -> IntArray) {
          val pending = goAsync()
-@@ -397,25 +407,34 @@ class SmartWidgetProvider : AppWidgetProvider() {
+@@ -397,25 +408,34 @@ class SmartWidgetProvider : AppWidgetProvider() {
          }
      }
  
