@@ -3883,7 +3883,7 @@ index b0f9787f..e0b3b894 100644
  }
 diff --git a/docs/smart-widget.md b/docs/smart-widget.md
 new file mode 100644
-index 00000000..b87df698
+index 00000000..e1322238
 --- /dev/null
 +++ b/docs/smart-widget.md
 @@ -0,0 +1,916 @@
