@@ -230,7 +230,7 @@ index 17ccbe87..b9aa6761 100644
              WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                  "attendance_widget_sync",
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
-index d95decf7..e48d2595 100644
+index d95decf7..7fad4fa0 100644
 --- a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 @@ -7,119 +7,72 @@ import android.appwidget.AppWidgetProvider
@@ -457,6 +457,17 @@ index d95decf7..e48d2595 100644
              date = today,
              swipe = swipe,
 -            checkedAgoMin = checkedAgoMin,
+-        )
+-        // 「正在查询…」只在真正答不上来的那一屏上顶替时效文案：用户点了刷新要能看到反应，
+-        // 但不能把「已打卡 · 正常」这种实打实的结论也换成在查。
+-        val scene = if (querying && built.statusIsGuess) built.copy(meta = "正在查询…") else built
+-        val launch = Intent(context, MainActivity::class.java).apply {
+-            putExtra(MainActivity.EXTRA_LAUNCH_ROUTE, scene.route.id)
+-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+-        }
+-        val pending = PendingIntent.getActivity(
+-            context, RequestCodes.SMART_WIDGET, launch,
+-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
 +            checkedAgoMin = checked?.let { ((nowMs - it) / 60_000L).toInt() },
 +            lastCheckAtMs = checked,
 +            checkedAtClock = checked?.let { clockOf(it) },
@@ -474,17 +485,6 @@ index d95decf7..e48d2595 100644
 +                if (entries.isEmpty()) null else "教务 · 新通知"
 +            }.getOrNull(),
          )
--        // 「正在查询…」只在真正答不上来的那一屏上顶替时效文案：用户点了刷新要能看到反应，
--        // 但不能把「已打卡 · 正常」这种实打实的结论也换成在查。
--        val scene = if (querying && built.statusIsGuess) built.copy(meta = "正在查询…") else built
--        val launch = Intent(context, MainActivity::class.java).apply {
--            putExtra(MainActivity.EXTRA_LAUNCH_ROUTE, scene.route.id)
--            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
--        }
--        val pending = PendingIntent.getActivity(
--            context, RequestCodes.SMART_WIDGET, launch,
--            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
--        )
 -        for (id in ids) {
 -            val views = RemoteViews(context.packageName, R.layout.widget_smart)
 -            views.setTextViewText(R.id.widget_smart_label, scene.label)
@@ -534,7 +534,7 @@ index d95decf7..e48d2595 100644
          val termCode = ScheduleWidgetUpdater.currentTermCode(context) ?: return null
          val account = com.xjtu.toolbox.account.AccountContext.activeAccountId
              ?: com.xjtu.toolbox.account.AccountStore().activeAccountId()
-@@ -217,131 +178,161 @@ object SmartWidgetUpdater {
+@@ -217,131 +178,193 @@ object SmartWidgetUpdater {
          return attendanceMarksOf(shard.records)
      }
  
@@ -543,9 +543,15 @@ index d95decf7..e48d2595 100644
      /**
 -     * @param attendance 这一学期落在本机的考勤索引；null = 本机还没有考勤缓存。
 -     * @param date 今天的日期（`2026-11-18`），按日期 + 节次找这一格的记录。
-+     * 按这个实例的**实际尺寸**选布局（§7.1）：用户能把它拖成 4×2、2×4，形态得跟着实例走。
++     * 按这个实例的**实际尺寸**选布局与行数。
 +     *
-+     * 两套布局的控件 id 完全相同——`RemoteViews` 找不到 id 会抛 `ActionException`，
++     * 两件事都在这里定：
++     * - **形态**：用户能把它拖成 4×2、2×4，形态得跟着实例宽度走；
++     * - **能放几行**：`minHeight` 只是「至少需要这么高」，同一个 2×2 在不同桌面网格下可能是
++     *   110dp 也可能是 140dp。拿实例给的 `OPTION_APPWIDGET_MIN_HEIGHT` 去算预算，
++     *   空间富余就多写一条钩子，不够就先砍钩子 —— 而不是一律按最紧的排、白白空着半个卡。
++     *
++     * 两套布局的控件 id 完全相同：`RemoteViews` 找不到 id 会抛 `ActionException`，
 +     * 整张卡片会变成「加载失败」占位，所以差异只能体现在排版上，不能体现在 id 上。
       */
 -    internal fun sceneOf(
@@ -578,15 +584,20 @@ index d95decf7..e48d2595 100644
 -            )
 +    private fun render(context: Context, manager: AppWidgetManager, id: Int, card: SmartCard) {
 +        val options = runCatching { manager.getAppWidgetOptions(id) }.getOrNull()
-+        val minWidth = options?.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH) ?: 0
-+        val form = SmartLayout.formOf(minWidth)
-+        val plan = SmartLayout.plan(card, form)
++        val widthDp = optionDp(options?.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH) ?: 0)
++        val heightDp = optionDp(options?.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT) ?: 0)
++        val form = SmartLayout.formOf(widthDp)
++        val plan = SmartLayout.plan(card, form, heightDp)
 +        val layout = when (form) {
 +            SmartLayout.Form.WIDE -> R.layout.widget_smart_wide
 +            SmartLayout.Form.COMPACT -> R.layout.widget_smart_compact
          }
 -        MEALS.firstOrNull { (_, start, end) -> nowMinute in start until end }?.let { (label, _, _) ->
 -            return SmartWidgetScene(label, "付款码", "校园卡余额 $balance", "打开付款码 ›", AppRoute.PaymentCode)
+-        }
+-        val next = courses.firstOrNull { it.startMinute > nowMinute }
+-        if (next != null) {
+-            return SmartWidgetScene("下一节 ${clock(next.startMinute)}", next.name, timeAndPlace(next), "查看日程 ›", AppRoute.Schedule)
 +        val views = RemoteViews(context.packageName, layout)
 +        val block = plan.block
 +
@@ -596,20 +607,25 @@ index d95decf7..e48d2595 100644
 +        views.putText(R.id.widget_smart_status, block.statusLine)
 +        block.statusColor?.let { views.setTextColor(R.id.widget_smart_status, it) }
 +
-+        // 内容块整块可点（§5.1）：点场景/标题/细节/状态都进这件事对应的页面
++        // 内容块整块可点：点场景/标题/细节/状态都进这件事对应的页面。
++        // 底栏的图标各有各的 id，点区不会互相盖住。
 +        val open = contentIntent(context, id, block.route)
 +        for (row in ROW_IDS) views.setOnClickPendingIntent(row, open)
 +        views.setOnClickPendingIntent(R.id.widget_smart_root, open)
 +
-+        // 钩子：有余量才写，没有就整行 GONE（GONE 不留空行，也不占高）
-+        HOOK_IDS.forEachIndexed { i, hookId ->
-+            views.putText(hookId, plan.hooks.getOrNull(i))
-         }
--        val next = courses.firstOrNull { it.startMinute > nowMinute }
--        if (next != null) {
--            return SmartWidgetScene("下一节 ${clock(next.startMinute)}", next.name, timeAndPlace(next), "查看日程 ›", AppRoute.Schedule)
++        // 三道分隔：块与钩子之间、键区与内容之间（横线），宽卡还有左右两栏之间的竖线。
++        // 没有分隔线的话，几行字糊成一片，看不出哪里是「一件事」的边界。
++        views.setViewVisibility(
++            R.id.widget_smart_hook_divider,
++            if (plan.showHookDivider) View.VISIBLE else View.GONE,
++        )
++        views.setViewVisibility(
++            R.id.widget_smart_vdivider,
++            if (plan.showRailDivider) View.VISIBLE else View.GONE,
++        )
 +
-+        // 底栏：前两个随场景变，「刷新」固定在最右（§5.6）
++        HOOK_IDS.forEachIndexed { i, hookId -> views.putText(hookId, plan.hooks.getOrNull(i)) }
++
 +        KEY_IDS.forEachIndexed { slot, keyId ->
 +            bindKey(context, views, id, slot, keyId, plan.keys.getOrNull(slot))
          }
@@ -617,6 +633,30 @@ index d95decf7..e48d2595 100644
 -        return SmartWidgetScene(label, "校园卡 $balance", "饭点会自动换成付款码入口", "查看校园卡 ›", AppRoute.CampusCard)
 +
 +        manager.updateAppWidget(id, views)
+     }
+ 
+     /**
+-     * 这节课的考勤：一句话 + 该染的颜色 + 是不是真有记录。
+-     *
+-     * [recorded] 为 false 时，这个结论只是按时钟的推断（「待考勤」/「迟到 · 还没刷上」），
+-     * 学校那边随时可能写出一条记录推翻它 —— 卡片据此决定要不要自己回来看一眼。
++     * 把 `getAppWidgetOptions` 里的尺寸换成 dp。
+      *
+-     * 判据按用户要求的口径（2026-11-18 反馈）：
+-     * - 有记录就照实报：正常 / 迟到 / 缺勤 / 请假（请假单独说，不带「打卡」）；
+-     * - **课前到上课 5 分钟内没记录 ⇒「待考勤」**——这时候学校还没到出结论的点，
+-     *   说「未记录」像是在报错；
+-     * - **上课 5 分钟后仍没记录 ⇒「迟到 · 还没刷上」**，这是用户要的即时提醒：
+-     *   过了这个点还没刷上，基本就要被记迟到了，得赶紧去补。
++     * 坑在这儿：不同版本、不同桌面塞进 Bundle 的单位并不一致 —— 同一个 110dp 的 2×2，
++     * 有的给 `110`，有的给 `28160`（帧内部按 1/256 dp 存）。不归一的话，一个 2×2 会被
++     * 判成「宽 110 个 1/256 dp = 28160dp」，直接进宽卡形态。
++     * 判据：真机上的小组件宽度不可能超过几千 dp，超过就按 1/256 dp 换算。
++     */
++    internal fun optionDp(raw: Int): Int = when {
++        raw <= 0 -> 0
++        raw > 4000 -> raw / 256
++        else -> raw
 +    }
 +
 +    private fun bindKey(
@@ -647,40 +687,31 @@ index d95decf7..e48d2595 100644
 +        views.setOnClickPendingIntent(keyId, keyIntent(context, widgetId, slot, key))
 +    }
 +
++    /**
++     * 键盘上的一个图标。
+      *
+-     * 这一屏只在「课前 [CLASS_LEAD_MIN] 分钟 ～ 下课」之间出现，所以下课之后的「缺勤」
+-     * 由学校的流水自己给，不能靠这里按时钟猜。
++     * 一种键一个图标，一一对应 —— 没有多余的备用图标，也没有一个图标干两件事的歧义。
++     * 全部是 24dp 单色矢量，实际颜色由 `setColorFilter` 在运行时给。
++     */
 +    private fun iconOf(kind: SmartKeyKind): Int = when (kind) {
 +        SmartKeyKind.ATTENDANCE -> R.drawable.ic_widget_attendance
 +        SmartKeyKind.REFRESH -> R.drawable.ic_widget_refresh
 +        SmartKeyKind.QR -> R.drawable.ic_widget_qr
-+        // 座位图标复用通知栏那颗，不重复画一份
-+        SmartKeyKind.SEAT -> R.drawable.ic_notification_seat
 +        SmartKeyKind.PAYMENT -> R.drawable.ic_widget_payment
 +        SmartKeyKind.CARD -> R.drawable.ic_widget_card
-+        SmartKeyKind.CALENDAR, SmartKeyKind.SCHOOL_CALENDAR -> R.drawable.ic_widget_calendar
++        SmartKeyKind.CALENDAR -> R.drawable.ic_widget_calendar
 +        SmartKeyKind.CHECKIN -> R.drawable.ic_widget_checkin
 +        SmartKeyKind.INBOX -> R.drawable.ic_widget_inbox
 +        SmartKeyKind.LEAVE -> R.drawable.ic_widget_leave
 +        SmartKeyKind.RETURN -> R.drawable.ic_widget_return
 +        SmartKeyKind.CANCEL -> R.drawable.ic_widget_cancel
-+        SmartKeyKind.TASK -> R.drawable.ic_widget_task
-     }
- 
-     /**
--     * 这节课的考勤：一句话 + 该染的颜色 + 是不是真有记录。
++    }
++
++    /**
 +     * 一个键按下去做什么。
       *
--     * [recorded] 为 false 时，这个结论只是按时钟的推断（「待考勤」/「迟到 · 还没刷上」），
--     * 学校那边随时可能写出一条记录推翻它 —— 卡片据此决定要不要自己回来看一眼。
--     *
--     * 判据按用户要求的口径（2026-11-18 反馈）：
--     * - 有记录就照实报：正常 / 迟到 / 缺勤 / 请假（请假单独说，不带「打卡」）；
--     * - **课前到上课 5 分钟内没记录 ⇒「待考勤」**——这时候学校还没到出结论的点，
--     *   说「未记录」像是在报错；
--     * - **上课 5 分钟后仍没记录 ⇒「迟到 · 还没刷上」**，这是用户要的即时提醒：
--     *   过了这个点还没刷上，基本就要被记迟到了，得赶紧去补。
--     *
--     * 这一屏只在「课前 [CLASS_LEAD_MIN] 分钟 ～ 下课」之间出现，所以下课之后的「缺勤」
--     * 由学校的流水自己给，不能靠这里按时钟猜。
--     *
 -     * 找记录用日期 + 节次 + 课程号/课名（[SlotAttendanceMarks.recordAt]），**不用周次**：
 -     * 教务和考勤系统算周次的起始日未必同一天，差一天就整体错一周，
 -     * 于是明明记了考勤却查不到——正是「考勤正常却显示未记录」的成因。
@@ -745,14 +776,14 @@ index d95decf7..e48d2595 100644
 +            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
 +        )
 +    }
-+
-+    private fun requestCode(widgetId: Int, slot: Int): Int =
-+        RequestCodes.SMART_WIDGET + widgetId.coerceAtLeast(0) * 10 + slot
  
 -        // 这一格还没有记录：按此刻距上课多久给一个即时结论
 -        val lateAt = course.startMinute + LATE_AFTER_MIN
 -        return if (nowMinute < lateAt) AttendanceOutcome("待考勤", COLOR_PENDING, recorded = false)
 -        else AttendanceOutcome("迟到 · 还没刷上", COLOR_LATE, recorded = false)
++    private fun requestCode(widgetId: Int, slot: Int): Int =
++        RequestCodes.SMART_WIDGET + widgetId.coerceAtLeast(0) * 10 + slot
++
 +    private fun RemoteViews.putText(id: Int, value: String?) {
 +        setTextViewText(id, value.orEmpty())
 +        setViewVisibility(id, if (value.isNullOrBlank()) View.GONE else View.VISIBLE)
@@ -802,7 +833,7 @@ index d95decf7..e48d2595 100644
          val at = boundaries.filter { it > nowMinute }.minOrNull()
              ?.let { now.toLocalDate().atStartOfDay().plusMinutes(it.toLong()) }
              ?: now.toLocalDate().plusDays(1).atStartOfDay()
-@@ -350,6 +341,7 @@ object SmartWidgetUpdater {
+@@ -350,6 +373,7 @@ object SmartWidgetUpdater {
          context.getSystemService(AlarmManager::class.java)
              ?.setWindow(AlarmManager.RTC, millis, 2 * 60_000L, refreshIntent(context))
      }
@@ -810,7 +841,7 @@ index d95decf7..e48d2595 100644
      internal fun cancel(context: Context) {
          context.getSystemService(AlarmManager::class.java)?.cancel(refreshIntent(context))
      }
-@@ -364,7 +356,7 @@ object SmartWidgetUpdater {
+@@ -364,7 +388,7 @@ object SmartWidgetUpdater {
       * 卡片上那颗「刷新」：发一条广播给小组件自己。
       *
       * **不打开 App**：点一下只做「立刻问一次学校 + 重画卡片」，这是用户想要「马上知道」时
@@ -819,7 +850,7 @@ index d95decf7..e48d2595 100644
       */
      private fun refreshNowIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
          context, RequestCodes.SMART_WIDGET_REFRESH_NOW,
-@@ -372,18 +364,37 @@ object SmartWidgetUpdater {
+@@ -372,18 +396,37 @@ object SmartWidgetUpdater {
          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
      )
  
@@ -841,15 +872,15 @@ index d95decf7..e48d2595 100644
 +        R.id.widget_smart_detail,
 +        R.id.widget_smart_status,
 +    )
- 
--    private fun clock(minute: Int): String = "%02d:%02d".format(minute / 60, minute % 60)
++
 +    private val HOOK_IDS = intArrayOf(
 +        R.id.widget_smart_hook1,
 +        R.id.widget_smart_hook2,
 +        R.id.widget_smart_hook3,
 +        R.id.widget_smart_hook4,
 +    )
-+
+ 
+-    private fun clock(minute: Int): String = "%02d:%02d".format(minute / 60, minute % 60)
 +    private val KEY_IDS = intArrayOf(
 +        R.id.widget_smart_key1,
 +        R.id.widget_smart_key2,
@@ -864,7 +895,7 @@ index d95decf7..e48d2595 100644
  class SmartWidgetProvider : AppWidgetProvider() {
      private fun updateAsync(context: Context, ids: () -> IntArray) {
          val pending = goAsync()
-@@ -397,25 +408,34 @@ class SmartWidgetProvider : AppWidgetProvider() {
+@@ -397,25 +440,34 @@ class SmartWidgetProvider : AppWidgetProvider() {
          }
      }
  
@@ -920,10 +951,10 @@ index 5840d6b5..9caea58e 100644
      }
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
 new file mode 100644
-index 00000000..75da2932
+index 00000000..9a05df41
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
-@@ -0,0 +1,638 @@
+@@ -0,0 +1,645 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +import com.xjtu.toolbox.attendance.WaterType
@@ -1261,45 +1292,57 @@ index 00000000..75da2932
 +            .sortedWith(compareBy({ it.rank.ordinal }, { it.anchor }))
 +    }
 +
-+    // ══════ 底栏快捷键（§5.7） ══════
++    // ══════ 底栏快捷键 ══════
 +
 +    /**
-+     * 底栏三个位置：**前两个随场景变，「刷新」固定占最右边**。
++     * 底栏放什么键。
 +     *
-+     * 刷新是每个场景都可能要的动作，放固定位置用户不用找；动作键优先于导航键 ——
-+     * 动作键省掉的是「进 App → 找按钮 → 点确认」三步。
++     * 一条铁律先立住：**点那块内容能到的地方，底栏就不许再放一个图标。**
++     * 以前上课那一屏同时有「点标题进考勤页」和一颗「考勤」图标、下一节那一屏同时有
++     * 「点标题进日程」和一颗「日程」图标 —— 一个目的地两个入口，纯属占地方。
++     * 所以这里每一个键都必须是**内容块到不了**的那个地方，或者是一个**动作**：
++     *
++     * | 主要信息 | 点它去哪 | 底栏还缺什么 |
++     * |---|---|---|
++     * | 这一堂课 | 考勤页 | 扫码、刷新（结论已是定论时刷新没意义） |
++     * | 下一节 | 日程 | 查考勤 |
++     * | 饭点余额 | 付款码 | 校园卡 |
++     * | 课上完了 | 校园卡 | 付款码 |
++     * | 待办 | 那条待办自己 | 收纳 |
++     * | 图书馆 | 图书馆 | 座位动作 / 扫码 |
++     * | 考试、课表变动 | 日程 | 只有刷新 |
++     * | 放假 | 校历 | 日程 |
++     *
++     * 「刷新」固定占最右，它是每个场景都可能要的动作，位置不能变。
 +     */
 +    fun keysOf(facts: SmartFacts, block: SmartBlock): List<SmartKey> = when (block.module) {
-+        SmartModule.ATTENDANCE -> listOf(
-+            NavKey(SmartKeyKind.ATTENDANCE, "考勤", AppRoute.Attendance),
-+            NavKey(SmartKeyKind.QR, "扫码", AppRoute.QrScan),
-+            RefreshKey(),
-+        )
++        // 点块就进考勤页，所以只补「扫码」这个到不了的地方；结论已经是学校写下的定论时，
++        // 刷新也刷不出新东西，那个位置干脆空着
++        SmartModule.ATTENDANCE -> if (block.evidence == SmartEvidence.RECORDED) {
++            listOf(NavKey(SmartKeyKind.QR, "扫码", AppRoute.QrScan))
++        } else {
++            listOf(NavKey(SmartKeyKind.QR, "扫码", AppRoute.QrScan), RefreshKey())
++        }
 +        SmartModule.NEXT_CLASS -> listOf(
-+            NavKey(SmartKeyKind.CALENDAR, "日程", AppRoute.Schedule),
 +            NavKey(SmartKeyKind.ATTENDANCE, "考勤", AppRoute.Attendance),
 +            RefreshKey(),
 +        )
-+        SmartModule.TODO -> listOf(
-+            NavKey(SmartKeyKind.TASK, "去交", block.route),
-+            NavKey(SmartKeyKind.INBOX, "收纳", AppRoute.Inbox),
-+            RefreshKey(),
-+        )
++        // 点块进的是那条待办自己的页面；收纳是另一件事
++        SmartModule.TODO -> if (block.route == AppRoute.Inbox) {
++            listOf(RefreshKey())
++        } else {
++            listOf(NavKey(SmartKeyKind.INBOX, "收纳", AppRoute.Inbox), RefreshKey())
++        }
 +        SmartModule.LIBRARY -> libraryKeys(facts.library)
-+        SmartModule.CAMPUS_CARD -> listOf(
-+            NavKey(SmartKeyKind.PAYMENT, "付款码", AppRoute.PaymentCode),
-+            NavKey(SmartKeyKind.CARD, "校园卡", AppRoute.CampusCard),
-+            RefreshKey(),
-+        )
-+        SmartModule.EXAM -> listOf(
-+            NavKey(SmartKeyKind.CALENDAR, "日程", AppRoute.Schedule),
-+            RefreshKey(),
-+        )
++        // 饭点那一屏点块就打开付款码，所以补的是校园卡；反过来兜底那一屏补付款码
++        SmartModule.CAMPUS_CARD -> if (block.route == AppRoute.PaymentCode) {
++            listOf(NavKey(SmartKeyKind.CARD, "校园卡", AppRoute.CampusCard), RefreshKey())
++        } else {
++            listOf(NavKey(SmartKeyKind.PAYMENT, "付款码", AppRoute.PaymentCode), RefreshKey())
++        }
++        // 考试、课表变动：点块进日程，日程那一栏就是它自己，没有别的去处
++        SmartModule.EXAM, SmartModule.SCHEDULE_DIFF -> listOf(RefreshKey())
 +        SmartModule.HOLIDAY -> listOf(
-+            NavKey(SmartKeyKind.SCHOOL_CALENDAR, "校历", AppRoute.SchoolCalendar),
-+            RefreshKey(),
-+        )
-+        SmartModule.SCHEDULE_DIFF -> listOf(
 +            NavKey(SmartKeyKind.CALENDAR, "日程", AppRoute.Schedule),
 +            RefreshKey(),
 +        )
@@ -1310,21 +1353,16 @@ index 00000000..75da2932
 +    }
 +
 +    /**
-+     * 图书馆那一屏的键：**动作键只能执行「预约当前真的有这个按钮」的那个**（§5.3 ⚠️）。
++     * 图书馆那一屏的键：**动作键只能执行「预约当前真的有这个按钮」的那个**。
 +     *
 +     * 按钮集合来自最近一次查到的 `actionUrls.keys`（落盘见 `LibrarySeatStore`），
 +     * 查不到就不出现 —— 绝不写死一个学校那边已经没了的按钮。
 +     *
-+     * 没约座（空档期）时给两个并列入口（§5.8）：扫码与选座不是主次取舍，
-+     * 用户可能站在座位前扫码，也可能想打开平面图自己挑一个。
++     * 没约座（空档期）时只补「扫码」：选座就是点这块本身去的地方（图书馆页），不必再来一个图标。
 +     */
 +    private fun libraryKeys(lib: LibrarySeatFact?): List<SmartKey> {
 +        if (lib == null || !lib.active) {
-+            return listOf(
-+                NavKey(SmartKeyKind.QR, "扫码", AppRoute.QrScan),
-+                NavKey(SmartKeyKind.SEAT, "选座", AppRoute.Library),
-+                RefreshKey(),
-+            )
++            return listOf(NavKey(SmartKeyKind.QR, "扫码", AppRoute.QrScan), RefreshKey())
 +        }
 +        val first = SEAT_ACTION_ORDER.firstOrNull { lib.has(it) }
 +        val keys = mutableListOf<SmartKey>()
@@ -1564,10 +1602,10 @@ index 00000000..75da2932
 +}
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt
 new file mode 100644
-index 00000000..dcf429b4
+index 00000000..8b1ef57b
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,172 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +import com.xjtu.toolbox.nav.AppRoute
@@ -1642,12 +1680,15 @@ index 00000000..dcf429b4
 + * 只放种类不放图标资源：图标映射在渲染那一侧做，这样仲裁与布局这一整套纯逻辑
 + * 不必依赖 `R`，单测不碰 Android 资源。
 + *
-+ * 这里**没有「空教室」**：`EmptyRoomCache` 的键是「周次 + 星期 + 节次」组合，
-+ * 卡片冷启动时未必拼得出来，硬做只会显示一个过期的空教室数（M11 留到下一步）。
++ * **这里刻意没有「去交」「空教室」这类键**：
++ * - 「去交」指向的就是主要信息那一块本身的开着的页面 —— 点标题已经能到，再放一个图标是重复入口；
++ * - 空教室要「周次 + 星期 + 节次」才拼得出缓存键，卡片冷启动时未必有，硬做只会显示过期数字。
++ *
++ * 判据很简单：**这个键指向的东西，点那块内容到不了吗？** 到得了就不该有。
 + */
 +enum class SmartKeyKind {
-+    ATTENDANCE, REFRESH, QR, SEAT, PAYMENT, CARD, CALENDAR, SCHOOL_CALENDAR,
-+    CHECKIN, INBOX, LEAVE, RETURN, CANCEL, TASK,
++    ATTENDANCE, REFRESH, QR, PAYMENT, CARD, CALENDAR,
++    CHECKIN, INBOX, LEAVE, RETURN, CANCEL,
 +}
 +
 +/** 底栏上的一个键（§5.2）：导航键打开某个页面，动作键后台真做一件事。 */
@@ -1810,74 +1851,107 @@ index 00000000..b0a14b5e
 +}
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt
 new file mode 100644
-index 00000000..9250fd57
+index 00000000..2f7c37b6
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,225 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +/**
 + * 把判出来的一屏塞进卡片里：选形态、算高度预算、不够就**按块降级**。
 + *
-+ * 2026-11-18 之前卡片真的会被挤出去：`widget_smart.xml` 里主区各行都是 `wrap_content`、
-+ * 全书没有一处 `layout_weight`，最坏情况量出来约 181dp，而 `smart_widget_info.xml` 的
-+ * `minHeight` 只有 110dp —— 超出的约 70dp 正好把底栏顶出卡片（§1.3）。
++ * 这一层管三件事，都是「看上去挤不挤」的直接原因：
 + *
-+ * 两条根因各有一条对策，都在这里定下来：
-+ * 1. **布局侧**：主区 `height=0dp` + `weight=1`、底栏 `wrap_content` 锚底（见两套布局），
-+ *    于是内容再多也只会被裁，不会把底栏挤出去；
-+ * 2. **内容侧**：这一层按确定的预算（[CARD_HEIGHT_DP] 与下面那组行高常量）算出能放几条钩子，
-+ *    放不下就按 §8.1 的顺序砍。行高写死在这里而不是量出来，是因为**预算要能在单测里断言**，
-+ *    量出来的东西只有真机能验。
++ * 1. **安全距离**：四周留 `PAD_H × PAD_V` 的内边距（卡片背景是 16dp 圆角的形状，贴边会
++ *    被圆角切掉），行与行之间也都留了间距；钩子区、按键区各自再隔一条 1dp 分割线。
++ * 2. **按实例的实际高度算预算**：`minHeight` 是「至少需要多高」，不是「你只会分到这么高」。
++ *    同一个 2×2，在不同桌面网格下可能是 110dp 也可能是 140dp —— 拿实例给的
++ *    `OPTION_APPWIDGET_MIN_HEIGHT` 来算，空间富余就多写一条钩子，不够就先砍钩子。
++ * 3. **块可以占多行，砍的时候整行地砍**：顺序是「多余的钩子 → 细节行 → 状态行 → 场景行」，
++ *    标题与底栏永远不砍（标题是这个块的主语，底栏是唯一还能点的东西）。
 + */
 +object SmartLayout {
 +
-+    /** 卡片最小高度：`smart_widget_info.xml` 的 `minHeight`，也是「不能挤出」的红线。 */
-+    const val CARD_HEIGHT_DP = 110
++    /** 拿不到实例尺寸时的兜底：`smart_widget_info.xml` 的 `minHeight`，也是「不能挤出」的红线。 */
++    const val DEFAULT_HEIGHT_DP = 110
 +
-+    /** 上下内边距**各** [PAD_DP]。 */
-+    const val PAD_DP = 4
++    /**
++     * 左右内边距。
++     *
++     * 14dp 不是随手写的：卡片背景是 16dp 圆角的形状，圆角处的可视区域要满足
++     * `(16−x)² + (16−y)² ≤ 16²`，贴边的第一行字会被圆角切掉；14dp 加上行高，
++     * 第一行字的左边缘落在安全区内。同时也是 Android 12 起「小组件内容要离边」的通行建议。
++     */
++    const val PAD_H_DP = 14
 +
-+    const val ROW_LABEL_DP = 13
++    /** 上下内边距。比左右略小：竖向更贵（一行字就 15dp），圆角对上下第一行的切割也更浅。 */
++    const val PAD_V_DP = 8
++
++    const val ROW_LABEL_DP = 15
++    const val GAP_LABEL_DP = 1
 +    const val ROW_TITLE_DP = 22
-+    const val ROW_DETAIL_DP = 14
-+    const val ROW_STATUS_DP = 17
-+    const val ROW_HOOK_DP = 14
++    const val GAP_STATUS_DP = 2
++    const val ROW_STATUS_DP = 18
++    const val GAP_DETAIL_DP = 2
++    const val ROW_DETAIL_DP = 15
 +
-+    /** 底栏：24dp 图标的触控区压到 20dp，整行 22dp。 */
-+    const val ROW_KEYS_DP = 22
++    /** 钩子区：与块之间是一条 1dp 分割线，上下各留 [HOOK_LEAD_DP] / [HOOK_GAP_DP]。 */
++    const val HOOK_LEAD_DP = 6
++    const val DIVIDER_DP = 1
++    const val HOOK_GAP_DP = 6
++    const val ROW_HOOK_DP = 15
++
++    /** 按键区：再来一条分割线，把「能点的地方」与内容分开。 */
++    const val KEYS_LEAD_DP = 4
++    const val KEYBAR_DIVIDER_DP = 1
++    const val KEYBAR_GAP_DP = 4
++
++    /** 底栏高 24dp（图标 20dp + 上下各 2dp 的呼吸），是「点得中」的最小值。 */
++    const val ROW_KEYS_DP = 24
 +    const val KEY_ICON_DP = 20
-+    const val KEY_GAP_DP = 8
++    const val KEY_GAP_DP = 12
 +
-+    /** 底栏放得下的图标数（§5.6 的宽度预算：96dp 里 24dp×3 + 8dp×2 = 88dp）。 */
++    /** 底栏最多几个键：位置要固定、要少，多了就成了工具箱。 */
 +    const val MAX_KEYS = 3
 +
-+    /** 紧凑卡的钩子行：最宽裕时也就 3 条。 */
-+    const val COMPACT_MAX_HOOKS = 3
++    /**
++     * 紧凑卡底栏最多几个键。
++     *
++     * 算得出来：2×2 的卡宽 110dp，扣掉左右 14dp 内边距只剩 82dp；
++     * 三个 20dp 图标 + 两个 12dp 间距 = 84dp，差 2dp 就会把最右那颗挤出去。
++     * 所以紧凑卡只放两个，宽卡（≥220dp）才有三个位置。
++     */
++    const val COMPACT_MAX_KEYS = 2
 +
-+    /** 宽卡右栏能竖着排几条钩子（4 × 14dp = 56dp，比左栏 66dp 还矮）。 */
-+    const val WIDE_MAX_HOOKS = 4
++    /** 紧凑卡最多两条钩子；再多就该升级成宽卡了。 */
++    const val COMPACT_MAX_HOOKS = 2
 +
-+    /** 从这个宽度起算「宽卡」（§7.2 / §7.4）。 */
++    /** 宽卡右栏能竖着排几条钩子（15dp × 5 = 75dp，比左栏的四行还矮）。 */
++    const val WIDE_MAX_HOOKS = 5
++
++    /** 这个宽度起算「宽卡」（左栏一块 + 右栏钩子）。 */
 +    const val WIDE_MIN_WIDTH_DP = 220
++
++    /** 宽卡右栏宽度：钩子文案按这里裁（约 8 个字）。 */
++    const val WIDE_RAIL_DP = 88
 +
 +    /**
 +     * 各行的字数上限。
 +     *
-+     * 为什么在 Kotlin 侧截断而不是只靠 `ellipsize="end"`：不同 ROM 的 `TextView` 省略号行为
-+     * 不一致（有的把整行抹成「…」，有的干脆溢出到下一行被裁），而卡片只有 110dp 高，
++     * 为什么在 Kotlin 侧截断而不是只靠 `ellipsize="end"`：不同 ROM 的省略号行为不一致
++     * （有的把整行抹成「…」，有的干脆溢出到下一行被裁），而卡片的高度是算出来的，
 +     * 一行溢出就是把下面那行顶掉。所以**先按字数收一遍**，`ellipsize` 只当第二道保险。
 +     */
 +    const val TITLE_MAX = 18
-+    const val DETAIL_MAX = 22
++    const val DETAIL_MAX = 20
 +    const val STATUS_MAX = 24
-+    const val HOOK_MAX = 14
++    const val HOOK_MAX = 12
 +
-+    /** 两个形态：一套布局一个（成对的 `widget_smart_compact.xml` / `widget_smart_wide.xml`）。 */
++    /** 两个形态：一套布局一个（`widget_smart_compact.xml` / `widget_smart_wide.xml`）。 */
 +    enum class Form { COMPACT, WIDE }
 +
 +    /**
-+     * 卡片实例长宽给的是「能放下多少 dp」，按宽度挑形态。
++     * 按实例宽度挑形态。
 +     *
 +     * 用户可以把它拖成 4×2、2×4（`resizeMode="horizontal|vertical"`），所以形态必须跟着
 +     * 实例的实际尺寸走，而不是跟着安装时的默认值走。
@@ -1885,60 +1959,60 @@ index 00000000..9250fd57
 +    fun formOf(minWidthDp: Int): Form =
 +        if (minWidthDp >= WIDE_MIN_WIDTH_DP) Form.WIDE else Form.COMPACT
 +
-+    /** 这一屏的高度预算。宽卡左栏只有块，钩子挂在右栏、不占高。 */
-+    fun heightDp(
++    /**
++     * 这一屏要占的高度。宽卡的钩子在右栏，不占竖向预算，所以只算左栏那四行。
++     */
++    fun heightOf(
 +        form: Form,
 +        hasLabel: Boolean,
 +        hasDetail: Boolean,
 +        hasStatus: Boolean,
 +        hooks: Int,
 +    ): Int {
-+        val block = (if (hasLabel) ROW_LABEL_DP else 0) +
-+            ROW_TITLE_DP +
-+            (if (hasDetail) ROW_DETAIL_DP else 0) +
-+            (if (hasStatus) ROW_STATUS_DP else 0)
-+        val hookPart = if (form == Form.COMPACT) hooks.coerceAtMost(COMPACT_MAX_HOOKS) * ROW_HOOK_DP else 0
-+        return PAD_DP * 2 + block + hookPart + ROW_KEYS_DP
++        var h = PAD_V_DP * 2 + ROW_TITLE_DP +
++            KEYS_LEAD_DP + KEYBAR_DIVIDER_DP + KEYBAR_GAP_DP + ROW_KEYS_DP
++        if (hasLabel) h += ROW_LABEL_DP + GAP_LABEL_DP
++        if (hasStatus) h += GAP_STATUS_DP + ROW_STATUS_DP
++        if (hasDetail) h += GAP_DETAIL_DP + ROW_DETAIL_DP
++        if (form == Form.COMPACT && hooks > 0) {
++            h += HOOK_LEAD_DP + DIVIDER_DP + HOOK_GAP_DP + hooks.coerceAtMost(COMPACT_MAX_HOOKS) * ROW_HOOK_DP
++        }
++        return h
 +    }
 +
-+    /**
-+     * 底栏实际占的宽度（§5.6 的账）：图标 + 间距。
-+     *
-+     * 紧凑卡可用宽度是 110 − 左右内边距各 4 = 102dp，所以「3 个纯图标」是硬上限：
-+     * 4 个要 112dp，带两个文字标签要 106dp —— 都放不下。
-+     */
++    /** 底栏实际占的宽度：`n` 个 20dp 图标 + 间距。 */
 +    fun bottomBarWidthDp(keys: Int): Int =
 +        keys * KEY_ICON_DP + (keys - 1).coerceAtLeast(0) * KEY_GAP_DP
 +
 +    /**
-+     * 落成一屏实际要渲染的东西。**不够就整块整块地砍**（§8.1），不留半块：
-+     * 砍顺序是「多余的钩子 → 钩子全砍 → 细节行 → 状态行」，标题、场景行、底栏永远不砍。
++     * 落成一屏实际要渲染的东西。
++     *
++     * @param availableHeightDp 这个实例实际分到的高度（`OPTION_APPWIDGET_MIN_HEIGHT`）；
++     *   拿不到时给 [DEFAULT_HEIGHT_DP]，此时按最紧的预算排（只留一个块和底栏）。
 +     */
-+    fun plan(card: SmartCard, form: Form): Plan {
++    fun plan(card: SmartCard, form: Form, availableHeightDp: Int = DEFAULT_HEIGHT_DP): Plan {
++        val budget = availableHeightDp.coerceAtLeast(DEFAULT_HEIGHT_DP)
 +        val maxHooks = if (form == Form.COMPACT) COMPACT_MAX_HOOKS else WIDE_MAX_HOOKS
-+        val hooks = card.hooks.map { clamp(it.text, HOOK_MAX)!! }.take(maxHooks)
-+        val keys = card.keys.take(MAX_KEYS)
++
++        var label = !card.block.label.isNullOrBlank()
++        var status = card.block.statusLine != null
++        var detail = !card.block.detail.isNullOrBlank()
++        var hooks = card.hooks.size.coerceAtMost(maxHooks)
++
++        fun h(hookCount: Int) = heightOf(form, label, detail, status, hookCount)
++
++        // ① 钩子最先让（它本来就是「有余量才写」的）；宽卡的钩子不占高，所以这里只对紧凑卡生效
++        while (hooks > 0 && h(hooks) > budget) hooks--
++        // ② 再让细节行（细节随情境变，本来就可以没有）
++        if (h(0) > budget) detail = false
++        // ③ 状态行最后动；状态要么独占一行，要么这个块整个不出现 —— 绝不和标题挤一行
++        if (h(0) > budget) status = false
++        // ④ 场景行已经极小，砍到它说明连 110dp 都没有，只能留标题 + 底栏
++        if (h(0) > budget) label = false
++
++        // 排版前把长文案收一遍（见 TITLE_MAX 那组常量的注释）。状态行按**整句**收：
++        // 它已经把「结论 + 时效」拼成一句，分开收会把「查于 10:12」截掉。
 +        var block = card.block
-+
-+        fun fits(candidate: SmartBlock, hookCount: Int): Boolean = heightDp(
-+            form = form,
-+            hasLabel = !candidate.label.isNullOrBlank(),
-+            hasDetail = !candidate.detail.isNullOrBlank(),
-+            hasStatus = candidate.statusLine != null,
-+            hooks = hookCount,
-+        ) <= CARD_HEIGHT_DP
-+
-+        var used = hooks.size
-+        while (used > 0 && !fits(block, used)) used--
-+        // 钩子让完还放不下，才动细节行（细节随情境变，本来就可以没有）
-+        if (!fits(block, 0)) block = block.copy(detail = null)
-+        // 状态行最后才动；状态要么独占一行，要么这个块整个不出现 —— 绝不和标题挤一行
-+        if (!fits(block, 0)) block = block.copy(status = null, meta = null)
-+
-+        // 排版前把长文案收一遍（见 TITLE_MAX 那组常量的注释）。
-+        // 状态行按**整句**收：它已经把「结论 + 时效」拼成一句，分开收会把「查于 10:12」截掉，
-+        // 那就等于又变回一句没有时刻的断言。
-+        // 标题留空也不许炸：脏数据（教务给空课名）上面已经各自兜过一层，这里是最后一道。
 +        block = block.copy(
 +            label = clamp(block.label, DETAIL_MAX),
 +            title = clamp(block.title, TITLE_MAX).orEmpty(),
@@ -1946,27 +2020,47 @@ index 00000000..9250fd57
 +            status = clamp(block.statusLine, STATUS_MAX),
 +            meta = null,
 +        )
++        if (!label) block = block.copy(label = null)
++        if (!detail) block = block.copy(detail = null)
++        if (!status) block = block.copy(status = null)
 +
++        val hookTexts = card.hooks.map { clamp(it.text, HOOK_MAX)!! }.take(hooks)
 +        return Plan(
 +            form = form,
 +            block = block,
-+            hooks = hooks.take(used),
-+            keys = keys,
-+            heightDp = heightDp(
++            hooks = hookTexts,
++            keys = fitKeys(card.keys, if (form == Form.COMPACT) COMPACT_MAX_KEYS else MAX_KEYS),
++            /** 钩子区那条分割线要不要画：紧凑卡有钩子才画，宽卡由竖线分隔。 */
++            showHookDivider = form == Form.COMPACT && hookTexts.isNotEmpty(),
++            /** 宽卡左右两栏之间那条竖线。 */
++            showRailDivider = form == Form.WIDE,
++            heightDp = heightOf(
 +                form = form,
 +                hasLabel = !block.label.isNullOrBlank(),
 +                hasDetail = !block.detail.isNullOrBlank(),
 +                hasStatus = block.statusLine != null,
-+                hooks = used,
++                hooks = hookTexts.size,
 +            ),
 +        )
++    }
++
++    /**
++     * 底栏放不下时砍哪个：**砍中间那个，保住最右的「刷新」**。
++     *
++     * 刷新是每个场景都可能要的动作、位置固定不变，砍掉它比砍掉一个场景键更伤；
++     * 而场景键里越靠前的越紧急（图书馆那一屏是先「签到/离开」后「取消」）。
++     */
++    private fun fitKeys(keys: List<SmartKey>, max: Int): List<SmartKey> = when {
++        keys.size <= max -> keys
++        max <= 1 -> keys.take(max)
++        else -> keys.take(max - 1) + keys.last()
 +    }
 +
 +    /**
 +     * 按字数收一行字：超了就截断并补一个省略号。
 +     *
 +     * 只当**排版保险**用，不改语义 —— 所以截断点后面那个省略号很重要：
-+     * 少一个字符就少一个字的可信度，用户看到「…」才知道后面还有、不是学校只给了这些。
++     * 用户看到「…」才知道后面还有，而不是学校只给了这些。
 +     */
 +    fun clamp(text: String?, max: Int): String? = when {
 +        text.isNullOrBlank() -> null
@@ -1981,100 +2075,140 @@ index 00000000..9250fd57
 +        val block: SmartBlock,
 +        val hooks: List<String>,
 +        val keys: List<SmartKey>,
++        val showHookDivider: Boolean,
++        val showRailDivider: Boolean,
 +        val heightDp: Int,
 +    )
 +}
 diff --git a/app/src/main/res/drawable/ic_widget_attendance.xml b/app/src/main/res/drawable/ic_widget_attendance.xml
 new file mode 100644
-index 00000000..5709ec9a
+index 00000000..9824e6fc
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_attendance.xml
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,37 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Attendance: clipboard with three rows. -->
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.6"
-+        android:pathData="M6,3.5 L18,3.5 L18,21 L6,21 Z" />
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M5.00,4.60 L5.00,20.50 L19.00,20.50 L19.00,4.60 L5.00,4.60" />
 +    <path
 +        android:fillColor="#FFFFFF"
-+        android:pathData="M10,1.8 L14,1.8 L14,5 L10,5 Z" />
++        android:pathData="M9.30,2.20 L14.70,2.20 L14.70,5.60 L9.30,5.60 Z" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M8.6,9 L15.4,9 L15.4,10.4 L8.6,10.4 Z" />
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M8.20,10.60 L15.80,10.60" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M8.6,12.4 L15.4,12.4 L15.4,13.8 L8.6,13.8 Z" />
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M8.20,14.40 L15.80,14.40" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M8.6,15.8 L12.8,15.8 L12.8,17.2 L8.6,17.2 Z" />
-+
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M8.20,18.20 L12.80,18.20" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_calendar.xml b/app/src/main/res/drawable/ic_widget_calendar.xml
 new file mode 100644
-index 00000000..936f4b5c
+index 00000000..fe362660
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_calendar.xml
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,51 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Calendar: hangers, a frame and three rows. -->
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.6"
-+        android:pathData="M3,5 L21,5 L21,21 L3,21 Z" />
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M4.00,6.20 L20.00,6.20 L20.00,20.00 L4.00,20.00 L4.00,6.20" />
 +    <path
 +        android:fillColor="#FFFFFF"
-+        android:pathData="M3,5 L21,5 L21,8.4 L3,8.4 Z" />
++        android:pathData="M4.20,6.40 L19.80,6.40 L19.80,9.40 L4.20,9.40 Z" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M6.4,2 L8.4,2 L8.4,6.4 L6.4,6.4 Z" />
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M8.20,3.20 L8.20,7.60" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M15.6,2 L17.6,2 L17.6,6.4 L15.6,6.4 Z" />
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M15.80,3.20 L15.80,7.60" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M6.4,11 L11,11 L11,12.4 L6.4,12.4 Z" />
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M7.00,13.00 L10.60,13.00" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M13,11 L17.6,11 L17.6,12.4 L13,12.4 Z" />
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M13.40,13.00 L17.00,13.00" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M6.4,15 L17.6,15 L17.6,16.4 L6.4,16.4 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M6.4,18.2 L13,18.2 L13,19.6 L6.4,19.6 Z" />
-+
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M7.00,16.60 L13.40,16.60" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_cancel.xml b/app/src/main/res/drawable/ic_widget_cancel.xml
 new file mode 100644
-index 00000000..9998b366
+index 00000000..187e6925
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_cancel.xml
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,20 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Cancel: a cross. -->
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M18.6,6.8 L17.2,5.4 L12,10.6 L6.8,5.4 L5.4,6.8 L10.6,12 L5.4,17.2 L6.8,18.6 L12,13.4 L17.2,18.6 L18.6,17.2 L13.4,12 Z" />
-+
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M7.40,7.40 L16.60,16.60" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M16.60,7.40 L7.40,16.60" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_card.xml b/app/src/main/res/drawable/ic_widget_card.xml
 new file mode 100644
-index 00000000..03fa5119
+index 00000000..f5d48836
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_card.xml
 @@ -0,0 +1,19 @@
@@ -2083,159 +2217,212 @@ index 00000000..03fa5119
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Campus card: frame, magnetic stripe and chip. -->
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.6"
-+        android:pathData="M2,5 L22,5 L22,19 L2,19 Z" />
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M3.40,6.40 L20.60,6.40 L20.60,17.60 L3.40,17.60 L3.40,6.40" />
 +    <path
 +        android:fillColor="#FFFFFF"
-+        android:pathData="M2,8 L22,8 L22,10.6 L2,10.6 Z" />
++        android:pathData="M3.60,9.20 L20.40,9.20 L20.40,11.20 L3.60,11.20 Z" />
 +    <path
 +        android:fillColor="#FFFFFF"
-+        android:pathData="M5,13 L9,13 L9,16.4 L5,16.4 Z" />
-+
++        android:pathData="M6.40,13.00 L9.40,13.00 L9.40,15.80 L6.40,15.80 Z" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_checkin.xml b/app/src/main/res/drawable/ic_widget_checkin.xml
 new file mode 100644
-index 00000000..fc4e977f
+index 00000000..3971afea
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_checkin.xml
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,20 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Check-in: a tick. -->
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M9.2,16.4 L4.8,12 L3.4,13.4 L9.2,19.2 L20.6,7.8 L19.2,6.4 Z" />
-+
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M19.60,12.00 L19.53,12.99 L19.34,13.97 L19.02,14.91 L18.58,15.80 L18.03,16.63 L17.37,17.37 L16.63,18.03 L15.80,18.58 L14.91,19.02 L13.97,19.34 L12.99,19.53 L12.00,19.60 L11.01,19.53 L10.03,19.34 L9.09,19.02 L8.20,18.58 L7.37,18.03 L6.63,17.37 L5.97,16.63 L5.42,15.80 L4.98,14.91 L4.66,13.97 L4.47,12.99 L4.40,12.00 L4.47,11.01 L4.66,10.03 L4.98,9.09 L5.42,8.20 L5.97,7.37 L6.63,6.63 L7.37,5.97 L8.20,5.42 L9.09,4.98 L10.03,4.66 L11.01,4.47 L12.00,4.40 L12.99,4.47 L13.97,4.66 L14.91,4.98 L15.80,5.42 L16.63,5.97 L17.37,6.63 L18.03,7.37 L18.58,8.20 L19.02,9.09 L19.34,10.03 L19.53,11.01 L19.60,12.00" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M8.10,12.30 L10.90,15.10 L15.90,9.30" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_inbox.xml b/app/src/main/res/drawable/ic_widget_inbox.xml
 new file mode 100644
-index 00000000..0434579e
+index 00000000..f0a7b65c
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_inbox.xml
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,20 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Inbox: a tray with a notch. -->
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.6"
-+        android:pathData="M3.4,3.4 L20.6,3.4 L20.6,20.6 L3.4,20.6 Z" />
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M4.00,5.20 L20.00,5.20 L20.00,18.80 L4.00,18.80 L4.00,5.20" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M3.4,13.6 L8.4,13.6 L10,16 L14,16 L15.6,13.6 L20.6,13.6 L20.6,20.6 L3.4,20.6 Z" />
-+
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M4.20,13.00 L8.20,13.00 L9.80,15.60 L14.20,15.60 L15.80,13.00 L19.80,13.00" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_leave.xml b/app/src/main/res/drawable/ic_widget_leave.xml
 new file mode 100644
-index 00000000..9e30a143
+index 00000000..6db18516
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_leave.xml
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,27 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Leave (Out): an open frame with the arrow pointing out of it.
-+     Out/In ship as a pair: one alone is ambiguous, two side by side read as a
-+     turnstile and need no teaching. -->
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M3,3 L13,3 L13,5 L5,5 L5,19 L13,19 L13,21 L3,21 Z" />
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M9.20,4.20 L5.00,4.20 L5.00,19.80 L9.20,19.80" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M15,10.6 L18.6,10.6 L18.6,7.6 L23,12 L18.6,16.4 L18.6,13.4 L15,13.4 Z" />
-+
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M11.40,12.00 L19.60,12.00" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M16.40,8.80 L19.60,12.00 L16.40,15.20" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_payment.xml b/app/src/main/res/drawable/ic_widget_payment.xml
 new file mode 100644
-index 00000000..6b044cd4
+index 00000000..e75be87c
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_payment.xml
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,55 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Payment code entry: viewfinder corners plus a yuan sign (stroked, not a font glyph). -->
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M3.4,3.4 L8.6,3.4 L8.6,4.8 L4.8,4.8 L4.8,8.6 L3.4,8.6 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M15.4,3.4 L20.6,3.4 L20.6,8.6 L19.2,8.6 L19.2,4.8 L15.4,4.8 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M3.4,15.4 L4.8,15.4 L4.8,19.2 L8.6,19.2 L8.6,20.6 L3.4,20.6 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M19.2,15.4 L20.6,15.4 L20.6,20.6 L15.4,20.6 L15.4,19.2 L19.2,19.2 Z" />
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.5"
-+        android:pathData="M9,9 L12,12.6 L15,9" />
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M4.00,9.60 L4.00,5.60 L8.00,5.60" />
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.5"
-+        android:pathData="M12,12.6 L12,18" />
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M16.00,5.60 L20.00,5.60 L20.00,9.60" />
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.5"
-+        android:pathData="M9.6,14 L14.4,14" />
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M4.00,14.40 L4.00,18.40 L8.00,18.40" />
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.5"
-+        android:pathData="M9.6,16 L14.4,16" />
-+
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M16.00,18.40 L20.00,18.40 L20.00,14.40" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="1.7"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M9.20,9.60 L9.20,14.40" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="1.7"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M12.00,8.60 L12.00,15.40" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="1.7"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M14.80,9.60 L14.80,14.40" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_qr.xml b/app/src/main/res/drawable/ic_widget_qr.xml
 new file mode 100644
-index 00000000..d4ced0a5
+index 00000000..6b283c30
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_qr.xml
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,37 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- QR: four viewfinder corners plus the centre block. -->
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M4.00,9.60 L4.00,5.60 L8.00,5.60" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M16.00,5.60 L20.00,5.60 L20.00,9.60" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M4.00,14.40 L4.00,18.40 L8.00,18.40" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M16.00,18.40 L20.00,18.40 L20.00,14.40" />
 +    <path
 +        android:fillColor="#FFFFFF"
-+        android:pathData="M3,3 L9.5,3 L9.5,5 L5,5 L5,9.5 L3,9.5 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M14.5,3 L21,3 L21,9.5 L19,9.5 L19,5 L14.5,5 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M3,14.5 L5,14.5 L5,19 L9.5,19 L9.5,21 L3,21 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M19,14.5 L21,14.5 L21,21 L14.5,21 L14.5,19 L19,19 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M10,10 L14,10 L14,14 L10,14 Z" />
-+
++        android:pathData="M10.60,10.60 L13.40,10.60 L13.40,13.40 L10.60,13.40 Z" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_refresh.xml b/app/src/main/res/drawable/ic_widget_refresh.xml
 new file mode 100644
-index 00000000..a144297e
+index 00000000..4af01f01
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_refresh.xml
 @@ -0,0 +1,16 @@
@@ -2244,58 +2431,49 @@ index 00000000..a144297e
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Refresh: open ring plus a wedge head. Only 24dp so it reads at bottom-bar size. -->
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
 +        android:strokeWidth="2"
-+        android:pathData="M12,5.5 A6.5,6.5 0 1,1 5.5,12" />
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M10.78,5.11 L11.54,5.01 L12.31,5.01 L13.06,5.08 L13.81,5.24 L14.54,5.48 L15.23,5.79 L15.89,6.18 L16.50,6.64 L17.06,7.16 L17.55,7.74 L17.98,8.37 L18.34,9.04 L18.63,9.75 L18.83,10.48 L18.96,11.24 L19.00,12.00 L18.96,12.76 L18.83,13.52 L18.63,14.25 L18.34,14.96 L17.98,15.63 L17.55,16.26 L17.06,16.84 L16.50,17.36 L15.89,17.82 L15.23,18.21 L14.54,18.52 L13.81,18.76 L13.06,18.92 L12.31,18.99 L11.54,18.99 L10.78,18.89 L10.04,18.72 L9.32,18.47 L8.63,18.14 L7.98,17.73 L7.38,17.26 L6.84,16.73 L6.35,16.14 L5.94,15.50 L5.59,14.82 L5.32,14.10 L5.13,13.37 L5.03,12.61 L5.00,11.85 L5.06,11.09 L5.20,10.34 L5.42,9.61" />
 +    <path
 +        android:fillColor="#FFFFFF"
-+        android:pathData="M12,2.4 L17.2,5.4 L12,8.4 Z" />
-+
++        android:pathData="M13.90,4.50 L11.20,7.30 L10.40,2.90 Z" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_return.xml b/app/src/main/res/drawable/ic_widget_return.xml
 new file mode 100644
-index 00000000..9015a963
+index 00000000..0ca6c6ca
 --- /dev/null
 +++ b/app/src/main/res/drawable/ic_widget_return.xml
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,27 @@
 +<vector xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:width="24dp"
 +    android:height="24dp"
 +    android:viewportWidth="24"
 +    android:viewportHeight="24">
-+<!-- Return (In): the same frame, arrow pointing back in. -->
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M3,3 L13,3 L13,5 L5,5 L5,19 L13,19 L13,21 L3,21 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M22.4,10.6 L18.8,10.6 L18.8,7.6 L14.4,12 L18.8,16.4 L18.8,13.4 L22.4,13.4 Z" />
-+
-+</vector>
-diff --git a/app/src/main/res/drawable/ic_widget_task.xml b/app/src/main/res/drawable/ic_widget_task.xml
-new file mode 100644
-index 00000000..7136cbff
---- /dev/null
-+++ b/app/src/main/res/drawable/ic_widget_task.xml
-@@ -0,0 +1,16 @@
-+<vector xmlns:android="http://schemas.android.com/apk/res/android"
-+    android:width="24dp"
-+    android:height="24dp"
-+    android:viewportWidth="24"
-+    android:viewportHeight="24">
-+<!-- Task: a box with a tick in it. -->
 +    <path
 +        android:fillColor="#00000000"
 +        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.6"
-+        android:pathData="M3.4,3.4 L20.6,3.4 L20.6,20.6 L3.4,20.6 Z" />
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M9.20,4.20 L5.00,4.20 L5.00,19.80 L9.20,19.80" />
 +    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M10.4,15.6 L7.2,12.4 L6,13.6 L10.4,18 L18,10.4 L16.8,9.2 Z" />
-+
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M20.00,12.00 L11.80,12.00" />
++    <path
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFF"
++        android:strokeWidth="2"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round"
++        android:pathData="M15.00,8.80 L11.80,12.00 L15.00,15.20" />
 +</vector>
 diff --git a/app/src/main/res/layout/widget_smart.xml b/app/src/main/res/layout/widget_smart.xml
 deleted file mode 100644
@@ -2417,28 +2595,30 @@ index 76fd1fb6..00000000
 -</LinearLayout>
 diff --git a/app/src/main/res/layout/widget_smart_compact.xml b/app/src/main/res/layout/widget_smart_compact.xml
 new file mode 100644
-index 00000000..e3d591fc
+index 00000000..cba03caf
 --- /dev/null
 +++ b/app/src/main/res/layout/widget_smart_compact.xml
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,207 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!--
 +  智能卡片 · 紧凑形态（2×2，宽 < 220dp，见 SmartLayout.Form.COMPACT）。
 +
-+  ⚠️ 两条不能破的规矩：
++  三件不能破的事：
 +
-+  1. 布局里只能出现 RemoteViews 白名单里的控件。裸 <View>（占位撑高那种）不在白名单里 ——
++  1. **只能出现 RemoteViews 白名单里的控件。** 裸 <View>（占位撑高那种）不在白名单里 ——
 +     RemoteViews 反序列化后拿自己当 LayoutInflater.Filter（onLoadClass 只放行带
 +     @RemoteViews.RemoteView 注解的类，android.view.View 没有这个注解），撞上就抛
-+     InflateException，桌面显示「加载失败」并把整张卡片画成错误占位。<Space> 同理。
-+     撑高留白一律用空 TextView 或带 weight 的容器。
++     InflateException，桌面显示「加载失败」。撑高留白一律用空 TextView 或带 weight 的容器。
++     分隔线用 ImageView（1dp）配背景色 —— ImageView 在白名单内，<View> 不在。
 +
-+  2. **主区 layout_height=0dp + weight=1，底栏 wrap_content 放最后。** 6.0.1 的 #408 就是
-+     主区各行全用 wrap_content、整份布局没有一处 weight，内容一多（约 181dp）就把底栏顶出
-+     110dp 的卡片。锚底之后内容再多也只会被裁，底栏永远在卡内。
++  2. **主区 0dp + weight=1，底栏 wrap_content 放在最后。** 6.0.1 的 #408 就是主区各行全用
++     wrap_content、整份布局没有一处 weight，内容一多就把底栏顶出卡片。
 +
-+  行高一律写死 dp（不 wrap_content），这样高度预算能在单测里算出来、断言出来
-+  （SmartLayout 的那组常量与这里逐条对应，SmartWidgetLayoutBudgetTest 会盯着）。
++  3. **留出安全距离。** 背景是 16dp 圆角的形状，贴边的内容会被圆角切掉：四周 14×8dp 内边距，
++     行与行之间留 1–2dp，钩子区与按键区各用一条 1dp 分割线隔开（不然几行字糊成一片）。
++
++  行高一律写死 dp（不 wrap_content），这样高度预算能算出来、能断言（SmartLayout 的常量与
++  这里逐条对应，SmartWidgetLayoutBudgetTest 盯着）。
 +-->
 +<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:id="@+id/widget_smart_root"
@@ -2446,116 +2626,150 @@ index 00000000..e3d591fc
 +    android:layout_height="match_parent"
 +    android:background="@drawable/bg_schedule_widget"
 +    android:orientation="vertical"
-+    android:padding="4dp">
++    android:paddingHorizontal="14dp"
++    android:paddingVertical="8dp">
 +
-+    <!-- 主区：占满剩余高度，内容超了就被裁，绝不把底栏挤出去 -->
-+    <LinearLayout
++    <!-- 场景行：这件事是什么情境（上课中 / 下一节 10:10 / 午饭时间）。是场景词，不是功能名 -->
++    <TextView
++        android:id="@+id/widget_smart_label"
++        android:layout_width="wrap_content"
++        android:layout_height="15dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="10sp"
++        android:visibility="gone" />
++
++    <!-- 标题：这件事是什么。一行一件事，绝不和场景挤在一起 -->
++    <TextView
++        android:id="@+id/widget_smart_title"
++        android:layout_width="match_parent"
++        android:layout_height="22dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:textColor="@color/widget_on_surface"
++        android:textSize="17sp"
++        android:textStyle="bold" />
++
++    <!-- 状态：这件事的结论 + 它是什么时候的事实（「迟到 · 08:05 查过」）。必须独占一行 -->
++    <TextView
++        android:id="@+id/widget_smart_status"
++        android:layout_width="match_parent"
++        android:layout_height="18dp"
++        android:layout_marginTop="2dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:textColor="@color/widget_on_surface"
++        android:textSize="12sp"
++        android:textStyle="bold"
++        android:visibility="gone" />
++
++    <!-- 细节：补充事实。重要性随情境变（课前写地点、上课中写还剩多久），所以常常是空的 -->
++    <TextView
++        android:id="@+id/widget_smart_detail"
++        android:layout_width="match_parent"
++        android:layout_height="15dp"
++        android:layout_marginTop="2dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="11sp"
++        android:visibility="gone" />
++
++    <!-- 块与钩子之间的分隔线：有钩子才画（运行时按 SmartLayout 的判定切可见性） -->
++    <ImageView
++        android:id="@+id/widget_smart_hook_divider"
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:layout_marginTop="6dp"
++        android:background="@color/widget_divider"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no"
++        android:visibility="gone" />
++
++    <!-- 钩子：次要信息填空隙，一行一条，空间没了先没它 -->
++    <TextView
++        android:id="@+id/widget_smart_hook1"
++        android:layout_width="match_parent"
++        android:layout_height="15dp"
++        android:layout_marginTop="6dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="10sp"
++        android:visibility="gone" />
++
++    <TextView
++        android:id="@+id/widget_smart_hook2"
++        android:layout_width="match_parent"
++        android:layout_height="15dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="10sp"
++        android:visibility="gone" />
++
++    <!-- 紧凑卡最多两条钩子；这两格只为「两套布局的 id 必须完全一致」而存在，永远是 GONE -->
++    <TextView
++        android:id="@+id/widget_smart_hook3"
++        android:layout_width="match_parent"
++        android:layout_height="15dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="10sp"
++        android:visibility="gone" />
++
++    <TextView
++        android:id="@+id/widget_smart_hook4"
++        android:layout_width="match_parent"
++        android:layout_height="15dp"
++        android:ellipsize="end"
++        android:includeFontPadding="false"
++        android:maxLines="1"
++        android:textColor="@color/widget_on_surface_secondary"
++        android:textSize="10sp"
++        android:visibility="gone" />
++
++    <!-- 同上：宽卡的左右分栏竖线，紧凑卡里永远是 GONE（id 要与 widget_smart_wide.xml 对齐，
++         否则 RemoteViews 找不到 id 会抛 ActionException，整张卡变成「加载失败」） -->
++    <ImageView
++        android:id="@+id/widget_smart_vdivider"
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no"
++        android:visibility="gone" />
++
++    <!-- 把底栏压到卡底：空 TextView 撑开（不是 <View>，不在白名单） -->
++    <TextView
 +        android:layout_width="match_parent"
 +        android:layout_height="0dp"
 +        android:layout_weight="1"
-+        android:orientation="vertical">
++        android:importantForAccessibility="no" />
 +
-+        <!-- 场景行：这件事是什么情境（上课中 / 下一节 10:00 / 午饭时间）。是场景词，不是功能名 -->
-+        <TextView
-+            android:id="@+id/widget_smart_label"
-+            android:layout_width="wrap_content"
-+            android:layout_height="13dp"
-+            android:ellipsize="end"
-+            android:includeFontPadding="false"
-+            android:maxLines="1"
-+            android:textColor="@color/widget_on_surface_secondary"
-+            android:textSize="10sp"
-+            android:visibility="gone" />
++    <!-- 内容与按键之间的分隔线：让「能点的图标」和「读的字」一眼分开 -->
++    <ImageView
++        android:id="@+id/widget_smart_keybar_divider"
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:background="@color/widget_divider"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no" />
 +
-+        <!-- 标题：这件事是什么。一行一件事，绝不和场景挤在一起 -->
-+        <TextView
-+            android:id="@+id/widget_smart_title"
-+            android:layout_width="match_parent"
-+            android:layout_height="22dp"
-+            android:ellipsize="end"
-+            android:includeFontPadding="false"
-+            android:maxLines="1"
-+            android:textColor="@color/widget_on_surface"
-+            android:textSize="17sp"
-+            android:textStyle="bold" />
-+
-+        <!-- 细节：补充事实。重要性随情境变（课前写地点、上课中写还剩多久），所以常常是空的 -->
-+        <TextView
-+            android:id="@+id/widget_smart_detail"
-+            android:layout_width="match_parent"
-+            android:layout_height="14dp"
-+            android:ellipsize="end"
-+            android:includeFontPadding="false"
-+            android:maxLines="1"
-+            android:textColor="@color/widget_on_surface_secondary"
-+            android:textSize="11sp"
-+            android:visibility="gone" />
-+
-+        <!-- 状态：这件事的结论 + 它是什么时候的事实（「迟到 · 08:05 查过」）。状态必须独占一行 -->
-+        <TextView
-+            android:id="@+id/widget_smart_status"
-+            android:layout_width="match_parent"
-+            android:layout_height="17dp"
-+            android:ellipsize="end"
-+            android:includeFontPadding="false"
-+            android:maxLines="1"
-+            android:textColor="@color/widget_on_surface"
-+            android:textSize="12sp"
-+            android:textStyle="bold"
-+            android:visibility="gone" />
-+
-+        <!-- 钩子：次要信息填空隙，一行一条，空间没了先没它（14dp × 最多 3 条） -->
-+        <TextView
-+            android:id="@+id/widget_smart_hook1"
-+            android:layout_width="match_parent"
-+            android:layout_height="14dp"
-+            android:ellipsize="end"
-+            android:includeFontPadding="false"
-+            android:maxLines="1"
-+            android:textColor="@color/widget_on_surface_secondary"
-+            android:textSize="10sp"
-+            android:visibility="gone" />
-+
-+        <TextView
-+            android:id="@+id/widget_smart_hook2"
-+            android:layout_width="match_parent"
-+            android:layout_height="14dp"
-+            android:ellipsize="end"
-+            android:includeFontPadding="false"
-+            android:maxLines="1"
-+            android:textColor="@color/widget_on_surface_secondary"
-+            android:textSize="10sp"
-+            android:visibility="gone" />
-+
-+        <TextView
-+            android:id="@+id/widget_smart_hook3"
-+            android:layout_width="match_parent"
-+            android:layout_height="14dp"
-+            android:ellipsize="end"
-+            android:includeFontPadding="false"
-+            android:maxLines="1"
-+            android:textColor="@color/widget_on_surface_secondary"
-+            android:textSize="10sp"
-+            android:visibility="gone" />
-+
-+        <!-- 紧凑卡最多 3 条钩子；这一格只为「两套布局 id 必须完全一致」而存在，永远是 GONE -->
-+        <TextView
-+            android:id="@+id/widget_smart_hook4"
-+            android:layout_width="match_parent"
-+            android:layout_height="14dp"
-+            android:ellipsize="end"
-+            android:includeFontPadding="false"
-+            android:maxLines="1"
-+            android:textColor="@color/widget_on_surface_secondary"
-+            android:textSize="10sp"
-+            android:visibility="gone" />
-+    </LinearLayout>
-+
-+    <!-- 底栏：前两个键随场景变，「刷新」固定在最右（§5.6）。三个 20dp 图标 + 8dp 间距 = 76dp，
-+         110dp 的卡减掉左右内边距还有 102dp，放得下；四个就 104dp，放不下 —— 所以是三个。 -->
++    <!-- 底栏：左边随场景变，「刷新」固定在最右。三个 20dp 图标 + 12dp 间距 = 84dp，
++         110dp 的卡减掉左右内边距还有 82dp… 所以紧凑卡实际只放两个键 + 刷新 -->
 +    <LinearLayout
 +        android:layout_width="match_parent"
-+        android:layout_height="22dp"
++        android:layout_height="24dp"
++        android:layout_marginTop="4dp"
 +        android:gravity="center_vertical"
 +        android:orientation="horizontal">
 +
@@ -2571,12 +2785,11 @@ index 00000000..e3d591fc
 +            android:id="@+id/widget_smart_key2"
 +            android:layout_width="20dp"
 +            android:layout_height="20dp"
-+            android:layout_marginStart="8dp"
++            android:layout_marginStart="12dp"
 +            android:contentDescription="@string/smart_widget_name"
 +            android:scaleType="fitCenter"
 +            android:visibility="gone" />
 +
-+        <!-- 把「刷新」推到最右：空 TextView 撑开（不是 <View>，不在白名单） -->
 +        <TextView
 +            android:layout_width="0dp"
 +            android:layout_height="1dp"
@@ -2595,22 +2808,20 @@ index 00000000..e3d591fc
 +</LinearLayout>
 diff --git a/app/src/main/res/layout/widget_smart_wide.xml b/app/src/main/res/layout/widget_smart_wide.xml
 new file mode 100644
-index 00000000..5dcd813e
+index 00000000..a1fcb68c
 --- /dev/null
 +++ b/app/src/main/res/layout/widget_smart_wide.xml
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,203 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!--
 +  智能卡片 · 宽形态（4×2，宽 ≥ 220dp，见 SmartLayout.Form.WIDE）。
 +
-+  左栏 = 一个块占四行；右栏 = 钩子（竖着排，每行 14dp）；底栏横跨全宽。
++  左栏 = 一个块占四行；中间一条 1dp 竖线；右栏 = 钩子（宽 88dp，竖着排）；
++  底下一条 1dp 横线，再是底栏。三块内容各有一道分隔，不会糊成一片。
 +
 +  ⚠️ 控件 id 必须与 widget_smart_compact.xml **完全一致** —— RemoteViews 找不到 id 会抛
 +  ActionException，整张卡片会变成「加载失败」占位，所以形态差异只能体现在排版上。
 +  SmartWidgetLayoutBudgetTest 会核对两份布局的 id 集合。
-+
-+  主区同样 `height=0dp + weight=1` 锚底：宽卡比紧凑卡多的只是横向空间，
-+  竖向预算并没有变多（110dp 还是那个上限）。
 +-->
 +<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
 +    android:id="@+id/widget_smart_root"
@@ -2618,7 +2829,8 @@ index 00000000..5dcd813e
 +    android:layout_height="match_parent"
 +    android:background="@drawable/bg_schedule_widget"
 +    android:orientation="vertical"
-+    android:padding="4dp">
++    android:paddingHorizontal="14dp"
++    android:paddingVertical="8dp">
 +
 +    <LinearLayout
 +        android:layout_width="match_parent"
@@ -2636,7 +2848,7 @@ index 00000000..5dcd813e
 +            <TextView
 +                android:id="@+id/widget_smart_label"
 +                android:layout_width="wrap_content"
-+                android:layout_height="13dp"
++                android:layout_height="15dp"
 +                android:ellipsize="end"
 +                android:includeFontPadding="false"
 +                android:maxLines="1"
@@ -2656,20 +2868,10 @@ index 00000000..5dcd813e
 +                android:textStyle="bold" />
 +
 +            <TextView
-+                android:id="@+id/widget_smart_detail"
-+                android:layout_width="match_parent"
-+                android:layout_height="14dp"
-+                android:ellipsize="end"
-+                android:includeFontPadding="false"
-+                android:maxLines="1"
-+                android:textColor="@color/widget_on_surface_secondary"
-+                android:textSize="11sp"
-+                android:visibility="gone" />
-+
-+            <TextView
 +                android:id="@+id/widget_smart_status"
 +                android:layout_width="match_parent"
-+                android:layout_height="17dp"
++                android:layout_height="18dp"
++                android:layout_marginTop="2dp"
 +                android:ellipsize="end"
 +                android:includeFontPadding="false"
 +                android:maxLines="1"
@@ -2677,19 +2879,50 @@ index 00000000..5dcd813e
 +                android:textSize="12sp"
 +                android:textStyle="bold"
 +                android:visibility="gone" />
++
++            <TextView
++                android:id="@+id/widget_smart_detail"
++                android:layout_width="match_parent"
++                android:layout_height="15dp"
++                android:layout_marginTop="2dp"
++                android:ellipsize="end"
++                android:includeFontPadding="false"
++                android:maxLines="1"
++                android:textColor="@color/widget_on_surface_secondary"
++                android:textSize="11sp"
++                android:visibility="gone" />
++
++            <!-- 宽卡的钩子在右栏，这条横线永远是 GONE（id 要对齐紧凑卡） -->
++            <ImageView
++                android:id="@+id/widget_smart_hook_divider"
++                android:layout_width="match_parent"
++                android:layout_height="1dp"
++                android:background="@color/widget_divider"
++                android:contentDescription="@null"
++                android:importantForAccessibility="no"
++                android:visibility="gone" />
 +        </LinearLayout>
 +
-+        <!-- 右栏：钩子。约 96dp 宽 ⇒ 文案要短（「余额 ¥128」「考试 3 天」） -->
-+        <LinearLayout
-+            android:layout_width="96dp"
++        <!-- 左右两栏之间的分隔线 -->
++        <ImageView
++            android:id="@+id/widget_smart_vdivider"
++            android:layout_width="1dp"
 +            android:layout_height="match_parent"
-+            android:layout_marginStart="6dp"
++            android:layout_marginHorizontal="8dp"
++            android:background="@color/widget_divider"
++            android:contentDescription="@null"
++            android:importantForAccessibility="no" />
++
++        <!-- 右栏：钩子，约 8 个字一行 -->
++        <LinearLayout
++            android:layout_width="88dp"
++            android:layout_height="match_parent"
 +            android:orientation="vertical">
 +
 +            <TextView
 +                android:id="@+id/widget_smart_hook1"
 +                android:layout_width="match_parent"
-+                android:layout_height="14dp"
++                android:layout_height="15dp"
 +                android:ellipsize="end"
 +                android:includeFontPadding="false"
 +                android:maxLines="1"
@@ -2700,7 +2933,7 @@ index 00000000..5dcd813e
 +            <TextView
 +                android:id="@+id/widget_smart_hook2"
 +                android:layout_width="match_parent"
-+                android:layout_height="14dp"
++                android:layout_height="15dp"
 +                android:ellipsize="end"
 +                android:includeFontPadding="false"
 +                android:maxLines="1"
@@ -2711,7 +2944,7 @@ index 00000000..5dcd813e
 +            <TextView
 +                android:id="@+id/widget_smart_hook3"
 +                android:layout_width="match_parent"
-+                android:layout_height="14dp"
++                android:layout_height="15dp"
 +                android:ellipsize="end"
 +                android:includeFontPadding="false"
 +                android:maxLines="1"
@@ -2722,7 +2955,7 @@ index 00000000..5dcd813e
 +            <TextView
 +                android:id="@+id/widget_smart_hook4"
 +                android:layout_width="match_parent"
-+                android:layout_height="14dp"
++                android:layout_height="15dp"
 +                android:ellipsize="end"
 +                android:includeFontPadding="false"
 +                android:maxLines="1"
@@ -2732,10 +2965,20 @@ index 00000000..5dcd813e
 +        </LinearLayout>
 +    </LinearLayout>
 +
-+    <!-- 底栏：三个位置、都在底栏，一条规则不用记「这个尺寸快捷键在哪」 -->
++    <!-- 内容与按键之间的分隔线 -->
++    <ImageView
++        android:id="@+id/widget_smart_keybar_divider"
++        android:layout_width="match_parent"
++        android:layout_height="1dp"
++        android:layout_marginTop="4dp"
++        android:background="@color/widget_divider"
++        android:contentDescription="@null"
++        android:importantForAccessibility="no" />
++
 +    <LinearLayout
 +        android:layout_width="match_parent"
-+        android:layout_height="22dp"
++        android:layout_height="24dp"
++        android:layout_marginTop="4dp"
 +        android:gravity="center_vertical"
 +        android:orientation="horizontal">
 +
@@ -2751,7 +2994,7 @@ index 00000000..5dcd813e
 +            android:id="@+id/widget_smart_key2"
 +            android:layout_width="20dp"
 +            android:layout_height="20dp"
-+            android:layout_marginStart="8dp"
++            android:layout_marginStart="12dp"
 +            android:contentDescription="@string/smart_widget_name"
 +            android:scaleType="fitCenter"
 +            android:visibility="gone" />
@@ -3112,16 +3355,19 @@ index 00000000..bb3ebd81
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt
 new file mode 100644
-index 00000000..52be65ee
+index 00000000..1d719c74
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,210 @@
 +package com.xjtu.toolbox.widget
 +
++import com.xjtu.toolbox.attendance.AttendanceWaterRecord
++import com.xjtu.toolbox.attendance.WaterType
 +import com.xjtu.toolbox.inbox.InboxCategories
 +import com.xjtu.toolbox.inbox.InboxItem
 +import com.xjtu.toolbox.library.LibrarySeatFact
 +import com.xjtu.toolbox.nav.AppRoute
++import com.xjtu.toolbox.schedule.attendanceMarksOf
 +import com.xjtu.toolbox.widget.smart.NavKey
 +import com.xjtu.toolbox.widget.smart.RefreshKey
 +import com.xjtu.toolbox.widget.smart.SeatKey
@@ -3137,13 +3383,13 @@ index 00000000..52be65ee
 +import org.junit.Test
 +
 +/**
-+ * 底栏快捷键（`docs/smart-widget.md` §5.7）。
++ * 底栏快捷键。
 + *
-+ * 三条规矩，一条都不许破：
-+ * 1. **只有三个位置，全在底栏**，刷新固定占最右；
-+ * 2. **动作键只能执行预约当前真的有这个按钮的那个动作** —— 按钮集合来自最近一次查到的
-+ *    `actionUrls.keys`，写死一个学校那边已经没了的按钮，点下去只会静默失败；
-+ * 3. 动作键优先于导航键（它省掉的是「进 App → 找按钮 → 点确认」三步）。
++ * 第一原则是**不重复**：点内容块能到的地方，底栏不许再放一个图标。
++ * 以前上课那一屏同时有「点标题进考勤页」和一颗「考勤」图标、下一节那一屏同时有
++ * 「点标题进日程」和一颗「日程」图标 —— 一个目的地两个入口，白占地方。
++ *
++ * 所以这一组除了「有几个键」，更要断言「**哪个键不该有**」。
 + */
 +class SmartWidgetButtonTest {
 +
@@ -3152,10 +3398,9 @@ index 00000000..52be65ee
 +        startMinute = 610, endMinute = 720, color = 0, startSection = 3, endSection = 4,
 +    )
 +
-+    private fun todo(minutesLeft: Long) = InboxItem(
++    private fun todo(minutesLeft: Long, route: String? = AppRoute.Attendance.id) = InboxItem(
 +        id = "lms-1", category = InboxCategories.LMS, source = "思源学堂",
-+        title = "实验报告", expiresAt = 1_000_000_000L + minutesLeft * 60_000L,
-+        route = AppRoute.Attendance.id,
++        title = "实验报告", expiresAt = 1_000_000_000L + minutesLeft * 60_000L, route = route,
 +    )
 +
 +    private fun seat(actions: List<String>, status: String = "已预约") = LibrarySeatFact(
@@ -3163,93 +3408,137 @@ index 00000000..52be65ee
 +        actions = actions, at = 1_000_000_000L,
 +    )
 +
-+    private fun keysOf(nowMinute: Int, facts: SmartFacts = SmartFacts(nowMinute = nowMinute)): List<SmartKey> {
-+        val card = SmartArbiter.card(facts.copy(nowMinute = nowMinute))
-+        return card.keys
-+    }
++    private fun normalMarks() = attendanceMarksOf(
++        listOf(
++            AttendanceWaterRecord(
++                sbh = "1", startTime = 3, endTime = 4, week = 6, date = "2026-11-17",
++                courseName = "高等数学", courseCode = "", status = WaterType.NORMAL,
++            ),
++        ),
++    )
++
++    private fun keys(facts: SmartFacts): List<SmartKey> = SmartArbiter.card(facts).keys
 +
 +    private fun kinds(keys: List<SmartKey>) = keys.map { it.kind }
 +
 +    @Test
-+    fun `上课那一屏给考勤、扫码、刷新`() {
-+        val keys = keysOf(650, SmartFacts(nowMinute = 650, courses = listOf(course), checkedAgoMin = 1))
-+        assertEquals(
-+            listOf(SmartKeyKind.ATTENDANCE, SmartKeyKind.QR, SmartKeyKind.REFRESH),
-+            kinds(keys),
++    fun `上课那一屏只补扫码，不再重复一个「考勤」图标`() {
++        val ks = keys(SmartFacts(nowMinute = 650, courses = listOf(course), checkedAgoMin = 1))
++        // 点标题就进考勤页了，所以这里只有「扫码」这个到不了的地方 + 刷新
++        assertEquals(listOf(SmartKeyKind.QR, SmartKeyKind.REFRESH), kinds(ks))
++        assertTrue("最右永远是刷新", ks.last() is RefreshKey)
++    }
++
++    @Test
++    fun `考勤已经是定论时连刷新都不用`() {
++        val ks = keys(
++            SmartFacts(
++                nowMinute = 650, courses = listOf(course), date = "2026-11-17",
++                attendance = normalMarks(),
++            ),
 +        )
-+        // 刷新固定在最右
-+        assertTrue(keys.last() is RefreshKey)
++        // 学校已经写下「正常」，再点刷新也刷不出新东西，那个位置干脆空着
++        assertEquals(listOf(SmartKeyKind.QR), kinds(ks))
 +    }
 +
 +    @Test
-+    fun `饭点那一屏给付款码与校园卡`() {
-+        val keys = keysOf(
-+            11 * 60 + 30,
-+            SmartFacts(nowMinute = 11 * 60 + 30, courses = emptyList(), balance = "¥12.30"),
++    fun `下一节那一屏补的是考勤，不是日程`() {
++        val ks = keys(SmartFacts(nowMinute = 9 * 60 + 30, courses = listOf(course)))
++        assertEquals(listOf(SmartKeyKind.ATTENDANCE, SmartKeyKind.REFRESH), kinds(ks))
++        assertEquals(AppRoute.Attendance, (ks.first() as NavKey).route)
++    }
++
++    @Test
++    fun `饭点补校园卡，兜底补付款码`() {
++        val meal = keys(SmartFacts(nowMinute = 11 * 60 + 30, courses = emptyList(), balance = "¥12.30"))
++        assertEquals(listOf(SmartKeyKind.CARD, SmartKeyKind.REFRESH), kinds(meal))
++        assertEquals(AppRoute.CampusCard, (meal.first() as NavKey).route)
++
++        val done = keys(SmartFacts(nowMinute = 15 * 60, courses = listOf(course), balance = "¥8.00"))
++        assertEquals(listOf(SmartKeyKind.PAYMENT, SmartKeyKind.REFRESH), kinds(done))
++        assertEquals(AppRoute.PaymentCode, (done.first() as NavKey).route)
++    }
++
++    @Test
++    fun `待办那一屏补收纳，不重复那条待办自己的入口`() {
++        val ks = keys(SmartFacts(nowMinute = 900, nowMs = 1_000_000_000L, todos = listOf(todo(59))))
++        assertEquals(listOf(SmartKeyKind.INBOX, SmartKeyKind.REFRESH), kinds(ks))
++
++        // 待办没有指定页面时，块本身就落在收纳，那就不用再补收纳
++        val noRoute = keys(
++            SmartFacts(nowMinute = 900, nowMs = 1_000_000_000L, todos = listOf(todo(59, route = null))),
 +        )
-+        assertEquals(listOf(SmartKeyKind.PAYMENT, SmartKeyKind.CARD, SmartKeyKind.REFRESH), kinds(keys))
-+        assertEquals(AppRoute.PaymentCode, (keys.first() as NavKey).route)
++        assertEquals(listOf(SmartKeyKind.REFRESH), kinds(noRoute))
 +    }
 +
 +    @Test
-+    fun `待办那一屏的「去交」直接落到那条待办自己的页面`() {
-+        val keys = keysOf(900, SmartFacts(nowMinute = 900, nowMs = 1_000_000_000L, todos = listOf(todo(59))))
-+        assertEquals(listOf(SmartKeyKind.TASK, SmartKeyKind.INBOX, SmartKeyKind.REFRESH), kinds(keys))
-+        assertEquals(AppRoute.Attendance, (keys.first() as NavKey).route)
++    fun `考试与课表变动那一屏只剩刷新`() {
++        val diff = keys(SmartFacts(nowMinute = 15 * 60, scheduleDiff = "高等数学换教室"))
++        assertEquals(listOf(SmartKeyKind.REFRESH), kinds(diff))
 +    }
 +
 +    @Test
-+    fun `放假那一屏给校历`() {
-+        val keys = keysOf(15 * 60, SmartFacts(nowMinute = 15 * 60, holiday = "校庆"))
-+        assertEquals(listOf(SmartKeyKind.SCHOOL_CALENDAR, SmartKeyKind.REFRESH), kinds(keys))
++    fun `放假补日程`() {
++        val ks = keys(SmartFacts(nowMinute = 15 * 60, courses = emptyList(), holiday = "校庆"))
++        assertEquals(listOf(SmartKeyKind.CALENDAR, SmartKeyKind.REFRESH), kinds(ks))
 +    }
 +
 +    @Test
 +    fun `座位动作跟着最近一次查到的按钮集合走`() {
-+        // 待入馆签到：签到 + 取消
 +        val checkin = SmartArbiter.card(
 +            SmartFacts(nowMinute = 612, courses = listOf(course), library = seat(listOf("入馆签到", "取消预约"))),
 +        )
-+        assertEquals(listOf(SmartKeyKind.CHECKIN, SmartKeyKind.CANCEL, SmartKeyKind.REFRESH), kinds(checkin.keys))
-+        assertTrue("动作键要带动作名", (checkin.keys.first() as SeatKey).action == "入馆签到")
++        assertEquals(
++            listOf(SmartKeyKind.CHECKIN, SmartKeyKind.CANCEL, SmartKeyKind.REFRESH),
++            kinds(checkin.keys),
++        )
++        assertEquals("入馆签到", (checkin.keys.first() as SeatKey).action)
 +
-+        // 暂离中：返回 + 取消
 +        val back = SmartArbiter.card(
 +            SmartFacts(nowMinute = 900, library = seat(listOf("中途返回", "取消预约"), status = "暂离")),
 +        )
-+        assertEquals(listOf(SmartKeyKind.RETURN, SmartKeyKind.CANCEL, SmartKeyKind.REFRESH), kinds(back.keys))
++        assertEquals(
++            listOf(SmartKeyKind.RETURN, SmartKeyKind.CANCEL, SmartKeyKind.REFRESH),
++            kinds(back.keys),
++        )
 +
-+        // 在馆内：离开 + 取消
 +        val inside = SmartArbiter.card(
 +            SmartFacts(nowMinute = 900, library = seat(listOf("中途离开", "取消预约"), status = "使用中")),
 +        )
-+        assertEquals(listOf(SmartKeyKind.LEAVE, SmartKeyKind.CANCEL, SmartKeyKind.REFRESH), kinds(inside.keys))
++        assertEquals(
++            listOf(SmartKeyKind.LEAVE, SmartKeyKind.CANCEL, SmartKeyKind.REFRESH),
++            kinds(inside.keys),
++        )
 +    }
 +
 +    @Test
 +    fun `学校那边没有的动作绝不出现`() {
 +        // 只剩「取消预约」：不许凭空画一个「入馆签到」出来
-+        val block = SmartBlock(module = SmartModule.LIBRARY, label = "图书馆", title = "座位 3F-12", route = AppRoute.Library)
-+        val keys = SmartArbiter.keysOf(
++        val block = SmartBlock(
++            module = SmartModule.LIBRARY, label = "图书馆", title = "座位 3F-12",
++            route = AppRoute.Library,
++        )
++        val ks = SmartArbiter.keysOf(
 +            SmartFacts(nowMinute = 900, library = seat(listOf("取消预约"))),
 +            block,
 +        )
-+        assertEquals(listOf(SmartKeyKind.CANCEL, SmartKeyKind.REFRESH), kinds(keys))
-+        assertFalse("不该出现签到键", keys.any { it.kind == SmartKeyKind.CHECKIN })
++        assertEquals(listOf(SmartKeyKind.CANCEL, SmartKeyKind.REFRESH), kinds(ks))
++        assertFalse("不该出现签到键", ks.any { it.kind == SmartKeyKind.CHECKIN })
 +    }
 +
 +    @Test
-+    fun `没约座时扫码与选座是两个并列入口`() {
-+        // §5.8：猜错主次的代价是「点错按钮」，并排放的代价是零 —— 不做主次取舍
-+        val block = SmartBlock(module = SmartModule.LIBRARY, label = "图书馆", title = "空档", route = AppRoute.Library)
-+        val keys = SmartArbiter.keysOf(SmartFacts(nowMinute = 900), block)
-+        assertEquals(listOf(SmartKeyKind.QR, SmartKeyKind.SEAT, SmartKeyKind.REFRESH), kinds(keys))
-+        assertEquals(AppRoute.QrScan, (keys[0] as NavKey).route)
-+        assertEquals(AppRoute.Library, (keys[1] as NavKey).route)
++    fun `空档期只补扫码，选座就是点块本身`() {
++        val block = SmartBlock(
++            module = SmartModule.LIBRARY, label = "图书馆", title = "空档",
++            route = AppRoute.Library,
++        )
++        val ks = SmartArbiter.keysOf(SmartFacts(nowMinute = 900), block)
++        assertEquals(listOf(SmartKeyKind.QR, SmartKeyKind.REFRESH), kinds(ks))
++        assertEquals(AppRoute.QrScan, (ks.first() as NavKey).route)
 +    }
 +
 +    @Test
-+    fun `任何场景都不超过三个键，且最后一个永远是刷新`() {
++    fun `任何场景都不超过三个键，且刷新总在最右`() {
 +        val scenes = listOf(
 +            SmartFacts(nowMinute = 650, courses = listOf(course), checkedAgoMin = 1),
 +            SmartFacts(nowMinute = 612, courses = listOf(course), library = seat(listOf("入馆签到", "取消预约"))),
@@ -3257,18 +3546,21 @@ index 00000000..52be65ee
 +            SmartFacts(nowMinute = 11 * 60 + 30, balance = "¥1.00"),
 +            SmartFacts(nowMinute = 900, nowMs = 1_000_000_000L, todos = listOf(todo(59))),
 +            SmartFacts(nowMinute = 15 * 60, holiday = "校庆"),
++            SmartFacts(nowMinute = 900, nowMs = 1_000_000_000L, exam = null),
 +            SmartFacts(nowMinute = 3 * 60, courses = listOf(course)),
 +        )
-+        val layout = com.xjtu.toolbox.widget.smart.SmartLayout
 +        scenes.forEach { facts ->
 +            val card = SmartArbiter.card(facts)
-+            assertTrue("${card.block.label} 的键超过三个", card.keys.size <= layout.MAX_KEYS)
++            assertTrue(
++                "${card.block.label} 的键超过三个",
++                card.keys.size <= com.xjtu.toolbox.widget.smart.SmartLayout.MAX_KEYS,
++            )
 +            assertTrue("${card.block.label} 的最后一个键必须是刷新", card.keys.last() is RefreshKey)
 +        }
 +    }
 +
 +    @Test
-+    fun `键的文案就是动作名，无障碍要读得出来`() {
++    fun `键的文案就是动作名，无障碍读得出来`() {
 +        val checkin = SmartArbiter.card(
 +            SmartFacts(nowMinute = 612, courses = listOf(course), library = seat(listOf("入馆签到", "取消预约"))),
 +        )
@@ -3279,16 +3571,17 @@ index 00000000..52be65ee
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt
 new file mode 100644
-index 00000000..116182a9
+index 00000000..afb6bb7c
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,171 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.inbox.InboxCategories
 +import com.xjtu.toolbox.inbox.InboxItem
 +import com.xjtu.toolbox.library.LibrarySeatFact
 +import com.xjtu.toolbox.widget.smart.SmartArbiter
++import com.xjtu.toolbox.widget.smart.SmartCard
 +import com.xjtu.toolbox.widget.smart.SmartFacts
 +import com.xjtu.toolbox.widget.smart.SmartLayout
 +import org.junit.Assert.assertEquals
@@ -3298,11 +3591,19 @@ index 00000000..116182a9
 +import org.junit.Test
 +
 +/**
-+ * 容量与降级（`docs/smart-widget.md` §2.5 / §8.1）：
++ * 容量与降级。
 + *
-+ * - 一个块占多行，砍的时候按顺序整行砍：**多余的钩子 → 钩子全砍 → 细节行 → 状态行**；
-+ * - **标题、场景行、底栏永远不砍**；
-+ * - 放不下时高度必须落到 110dp 以内 —— 「不挤出」这件事得算得出来，不能靠真机看。
++ * 卡片的高度是**按实例算**的（`OPTION_APPWIDGET_MIN_HEIGHT`），所以这一组把同一屏内容
++ * 摆在 110 / 124 / 152 / 167dp 四个高度上，看它分别留下什么：
++ *
++ * | 高度 | 留下 |
++ * |---|---|
++ * | 110（最紧的 2×2） | 场景 + 标题 + 状态 + 底栏 |
++ * | 124 | 再加细节行 |
++ * | 152 | 再加一条钩子 |
++ * | 167 | 两条钩子（紧凑卡上限） |
++ *
++ * 砍的顺序永远一样：**多余的钩子 → 细节行 → 状态行 → 场景行**；标题和底栏永不砍。
 + */
 +class SmartWidgetCapacityTest {
 +
@@ -3323,31 +3624,7 @@ index 00000000..116182a9
 +        actions = listOf("中途离开", "取消预约"), at = 1_000_000_000L,
 +    )
 +
-+    private fun facts(
-+        nowMinute: Int = 650,
-+        todos: List<InboxItem> = emptyList(),
-+        balance: String? = null,
-+        library: LibrarySeatFact? = null,
-+        notice: String? = null,
-+        courses: List<WidgetCourse> = listOf(course),
-+        ago: Int? = 1,
-+    ) = SmartFacts(
-+        nowMinute = nowMinute,
-+        nowMs = 1_000_000_000L,
-+        courses = courses,
-+        date = "2026-11-17",
-+        todos = todos,
-+        balance = balance,
-+        library = library,
-+        notice = notice,
-+        checkedAgoMin = ago,
-+        checkedAtClock = "10:49",
-+    )
-+
-+    /**
-+     * 下午三点：今天已经没课，一屏只剩待办 —— 这样主要信息是待办，
-+     * 座位 / 余额 / 通知才有机会当钩子（有课时「已查证的迟到」会先占块，见仲裁表第 1 条）。
-+     */
++    /** 下午三点：今天已经没课，一屏只剩待办 —— 主要信息是待办，座位/余额/通知才能当钩子。 */
 +    private fun offClass(
 +        todos: List<InboxItem> = emptyList(),
 +        balance: String? = null,
@@ -3366,74 +3643,89 @@ index 00000000..116182a9
 +        checkedAtClock = "10:49",
 +    )
 +
++    /** 有三条钩子可挑的一屏（待办占块，座位 + 余额 + 通知当钩子）。 */
++    private fun busy(): SmartCard = SmartArbiter.card(
++        offClass(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
++    )
++
++    private fun plan(height: Int) = SmartLayout.plan(busy(), SmartLayout.Form.COMPACT, height)
++
 +    @Test
-+    fun `紧凑卡放不下三条钩子时先砍钩子`() {
-+        val card = SmartArbiter.card(
-+            offClass(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
++    fun `最紧的 110dp 只留一个块和底栏`() {
++        val p = plan(110)
++        assertEquals("实验报告", p.block.title)
++        assertNotNull("状态行不该被砍", p.block.statusLine)
++        assertNull("110dp 放不下细节行", p.block.detail)
++        assertTrue("110dp 放不下钩子", p.hooks.isEmpty())
++        assertTrue(p.heightDp <= SmartLayout.DEFAULT_HEIGHT_DP)
++    }
++
++    @Test
++    fun `多 14dp 就能把细节行放回来`() {
++        val p = plan(124)
++        assertEquals("思源学堂", p.block.detail)
++        assertTrue(p.hooks.isEmpty())
++        assertEquals(124, p.heightDp)
++    }
++
++    @Test
++    fun `再宽裕一点才开始写钩子`() {
++        assertEquals(1, plan(152).hooks.size)
++        assertEquals(2, plan(167).hooks.size)
++        // 紧凑卡最多两条，再多也不会挤进来
++        assertEquals(SmartLayout.COMPACT_MAX_HOOKS, plan(400).hooks.size)
++    }
++
++    @Test
++    fun `砍的顺序是钩子、细节、状态，标题永不砍`() {
++        // 从最宽裕一路收紧，逐档检查「谁还在」
++        val rich = plan(400)
++        assertEquals(2, rich.hooks.size)
++        assertNotNull(rich.block.detail)
++
++        val mid = plan(124)
++        assertTrue("钩子先没", mid.hooks.isEmpty())
++        assertNotNull("细节还在", mid.block.detail)
++
++        val tight = plan(110)
++        assertNull("然后才砍细节", tight.block.detail)
++        assertNotNull("状态行最后动", tight.block.statusLine)
++        assertEquals("标题永远在", "实验报告", tight.block.title)
++    }
++
++    @Test
++    fun `宽卡右栏不算竖向预算，钩子照样排得下`() {
++        val p = SmartLayout.plan(busy(), SmartLayout.Form.WIDE, 124)
++        assertTrue("宽卡把三条钩子都留下", p.hooks.size >= 3)
++        assertEquals(124, p.heightDp)
++        assertTrue("宽卡才显示左右分栏", p.showRailDivider)
++        assertTrue("宽卡的钩子在右栏，不需要横线", !p.showHookDivider)
++    }
++
++    @Test
++    fun `紧凑卡的钩子区有自己的横线`() {
++        assertTrue(plan(152).showHookDivider)
++        assertTrue("没有钩子就不画横线", !plan(110).showHookDivider)
++    }
++
++    @Test
++    fun `底栏位置按宽度算：紧凑两个、宽卡三个`() {
++        // 图书馆那一屏天然有三个键（签到 + 取消 + 刷新）
++        val lib = LibrarySeatFact(
++            seat = "3F-12", area = "兴庆三层", status = "使用中",
++            actions = listOf("入馆签到", "取消预约"), at = 1_000_000_000L,
 +        )
-+        assertEquals("三条钩子都该被挑出来", 3, card.hooks.size)
-+        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
-+        assertEquals("110dp 里只剩得下一条钩子", 1, plan.hooks.size)
-+        assertEquals(SmartLayout.CARD_HEIGHT_DP, plan.heightDp)
-+    }
++        val card = SmartArbiter.card(SmartFacts(nowMinute = 612, courses = listOf(course), library = lib))
++        assertEquals(3, card.keys.size)
 +
-+    @Test
-+    fun `砍的时候状态行与标题永不被砍`() {
-+        val card = SmartArbiter.card(
-+            offClass(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
-+        )
-+        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
-+        assertEquals("实验报告", plan.block.title)
-+        assertNotNull("状态行不该被砍", plan.block.statusLine)
-+        assertTrue(plan.heightDp <= SmartLayout.CARD_HEIGHT_DP)
-+    }
++        val compact = SmartLayout.plan(card, SmartLayout.Form.COMPACT, 110)
++        assertEquals(SmartLayout.COMPACT_MAX_KEYS, compact.keys.size)
++        // 砍的是中间那个（取消），最右的刷新必须保住
++        assertEquals(com.xjtu.toolbox.widget.smart.SmartKeyKind.CHECKIN, compact.keys.first().kind)
++        assertTrue(compact.keys.last() is com.xjtu.toolbox.widget.smart.RefreshKey)
 +
-+    @Test
-+    fun `宽卡右栏能把三条钩子都留下而高度不变`() {
-+        val card = SmartArbiter.card(
-+            offClass(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
-+        )
-+        val compact = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
-+        val wide = SmartLayout.plan(card, SmartLayout.Form.WIDE)
-+        assertEquals("宽卡右栏竖着排得下", card.hooks.size, wide.hooks.size)
-+        assertTrue("宽卡比紧凑卡能多放", wide.hooks.size > compact.hooks.size)
-+        // 钩子在右栏，不占竖向预算
-+        assertTrue(wide.heightDp <= SmartLayout.CARD_HEIGHT_DP)
-+        assertTrue(compact.heightDp <= SmartLayout.CARD_HEIGHT_DP)
-+    }
-+
-+    @Test
-+    fun `块四行加一条钩子正好装满一百一十`() {
-+        val card = SmartArbiter.card(facts(todos = listOf(todo(1500)), balance = "¥128.60"))
-+        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
-+        assertEquals(1, plan.hooks.size)
-+        assertEquals(SmartLayout.CARD_HEIGHT_DP, plan.heightDp)
-+    }
-+
-+    @Test
-+    fun `没有钩子的屏高度更矮，仍然合规`() {
-+        val card = SmartArbiter.card(facts())
-+        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
-+        assertTrue(plan.hooks.isEmpty())
-+        assertTrue(plan.heightDp < SmartLayout.CARD_HEIGHT_DP)
-+    }
-+
-+    @Test
-+    fun `细节行是可选的那个，可以整行没有`() {
-+        // 待办那一屏只有在知道来源时才有细节行；没有就是没有，不塞占位
-+        val card = SmartArbiter.card(offClass(todos = listOf(todo(30, source = "")), balance = "¥9.90"))
-+        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
-+        assertNull("没有来源就没有细节行", plan.block.detail)
-+        assertTrue(plan.heightDp <= SmartLayout.CARD_HEIGHT_DP)
-+    }
-+
-+    @Test
-+    fun `两种形态都只取三个键`() {
-+        val card = SmartArbiter.card(facts())
-+        for (form in SmartLayout.Form.values()) {
-+            val plan = SmartLayout.plan(card, form)
-+            assertTrue("底栏只有三个位置", plan.keys.size <= SmartLayout.MAX_KEYS)
-+        }
++        val wide = SmartLayout.plan(card, SmartLayout.Form.WIDE, 124)
++        assertEquals(3, wide.keys.size)
 +    }
 +
 +    @Test
@@ -3443,35 +3735,46 @@ index 00000000..116182a9
 +        assertEquals(SmartLayout.Form.WIDE, SmartLayout.formOf(220))
 +        assertEquals(SmartLayout.Form.WIDE, SmartLayout.formOf(320))
 +    }
++
++    @Test
++    fun `选项里的尺寸单位不统一也要认对`() {
++        // 同一个 110dp：有的桌面给 110，有的按 1/256 dp 给 28160
++        assertEquals(110, SmartWidgetUpdater.optionDp(110))
++        assertEquals(110, SmartWidgetUpdater.optionDp(28160))
++        assertEquals(0, SmartWidgetUpdater.optionDp(0))
++        assertEquals(SmartLayout.Form.COMPACT, SmartLayout.formOf(SmartWidgetUpdater.optionDp(28160)))
++        assertEquals(SmartLayout.Form.WIDE, SmartLayout.formOf(SmartWidgetUpdater.optionDp(250 * 256)))
++    }
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
 new file mode 100644
-index 00000000..34231543
+index 00000000..58067277
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,175 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.widget.smart.SmartLayout
 +import org.junit.Assert.assertEquals
-+import org.junit.Assert.assertNull
 +import org.junit.Assert.assertTrue
 +import org.junit.Test
 +import java.io.File
 +
 +/**
-+ * 布局预算（`docs/smart-widget.md` §7.3 / §5.6）。
++ * 布局预算（安全距离 + 装得下装不下）。
 + *
-+ * 这一组测的是**能不能装下**，而不是好不好看：
-+ * - 各行的行高写在布局里，也写在 [SmartLayout] 的常量里，两处必须逐条对上 ——
-+ *   对不上的话预算就是假的，真机上会重新挤出卡片；
-+ * - 两套布局的控件 id 必须完全一致：`RemoteViews` 找不到 id 会抛 `ActionException`，
-+ *   整张卡片会变成「加载失败」占位；
-+ * - 底栏三个 20dp 图标是 110dp 的卡放得下的上限，四个就超了。
++ * 这一组测的都是「真机上会不会被切掉、会不会挤出去」，全是能在普通 JVM 单测里算清楚的：
++ * - 四周内边距与行间距写在布局里，也写在 [SmartLayout] 的常量里，两处必须逐条对上；
++ * - 两套布局的控件 id 必须完全一致（`RemoteViews` 找不到 id 会抛 `ActionException`，
++ *   整张卡片变成「加载失败」）；
++ * - 底栏的图标数有硬上限，算得出来；
++ * - 各形态在 110dp（最紧）到 160dp（宽裕）下的高度都要落在预算内。
 + */
 +class SmartWidgetLayoutBudgetTest {
 +
 +    private fun layout(name: String) = File("src/main/res/layout/$name")
++
++    private val both = listOf("widget_smart_compact.xml", "widget_smart_wide.xml")
 +
 +    /** `android:id` → 那一行写死的行高（dp）。 */
 +    private fun rowHeights(file: File): Map<String, Int> {
@@ -3487,6 +3790,9 @@ index 00000000..34231543
 +        Regex("""android:id="@\+id/(widget_smart_\w+)"""")
 +            .findAll(file.readText()).map { it.groupValues[1] }.toSet()
 +
++    private fun attr(file: File, name: String): String? =
++        Regex("""android:$name="([^"]+)"""").find(file.readText())?.groupValues?.get(1)
++
 +    @Test
 +    fun `布局里写死的行高与预算常量逐条一致`() {
 +        val expected = mapOf(
@@ -3498,8 +3804,10 @@ index 00000000..34231543
 +            "widget_smart_hook2" to SmartLayout.ROW_HOOK_DP,
 +            "widget_smart_hook3" to SmartLayout.ROW_HOOK_DP,
 +            "widget_smart_hook4" to SmartLayout.ROW_HOOK_DP,
++            "widget_smart_hook_divider" to SmartLayout.DIVIDER_DP,
++            "widget_smart_keybar_divider" to SmartLayout.DIVIDER_DP,
 +        )
-+        for (name in listOf("widget_smart_compact.xml", "widget_smart_wide.xml")) {
++        for (name in both) {
 +            val actual = rowHeights(layout(name))
 +            expected.forEach { (id, dp) ->
 +                assertEquals("$name 的 $id 行高", dp, actual[id])
@@ -3508,18 +3816,39 @@ index 00000000..34231543
 +    }
 +
 +    @Test
++    fun `四周留够安全距离`() {
++        // 背景是 16dp 圆角的形状：贴边的内容会被圆角切掉，而且 Android 12 起
++        // 桌面本身还会再裁一圈。内边距必须写在布局里、且与预算常量一致。
++        for (name in both) {
++            val f = layout(name)
++            assertEquals("$name 的左右内边距", "${SmartLayout.PAD_H_DP}dp", attr(f, "paddingHorizontal"))
++            assertEquals("$name 的上下内边距", "${SmartLayout.PAD_V_DP}dp", attr(f, "paddingVertical"))
++        }
++    }
++
++    @Test
++    fun `行与行之间都有间距或分割线`() {
++        // 光靠字号区分不开「一件事」的边界：状态行/细节行要有间距，
++        // 块与钩子、内容与按键之间各有一条 1dp 分割线
++        for (name in both) {
++            val text = layout(name).readText()
++            assertTrue("$name 的状态行要留间距", text.contains("android:layout_marginTop=\"${SmartLayout.GAP_STATUS_DP}dp\""))
++            assertTrue("$name 要有钩子区横线", text.contains("@+id/widget_smart_hook_divider"))
++            assertTrue("$name 要有按键区横线", text.contains("@+id/widget_smart_keybar_divider"))
++            assertTrue("$name 要有左右分栏竖线", text.contains("@+id/widget_smart_vdivider"))
++            assertTrue("$name 的分割线要有颜色", text.contains("android:background=\"@color/widget_divider\""))
++        }
++    }
++
++    @Test
 +    fun `两套布局的控件 id 完全一致`() {
 +        // 形态差异只能体现在排版上；id 不一致会让某一形态直接「加载失败」
-+        assertEquals(
-+            ids(layout("widget_smart_compact.xml")),
-+            ids(layout("widget_smart_wide.xml")),
-+        )
++        assertEquals(ids(layout("widget_smart_compact.xml")), ids(layout("widget_smart_wide.xml")))
 +    }
 +
 +    @Test
 +    fun `主区锚底，底栏不会被内容挤出去`() {
-+        // 6.0.1 的 #408 就是主区全 wrap_content、没有一处 weight，内容一多就把底栏顶出卡片
-+        for (name in listOf("widget_smart_compact.xml", "widget_smart_wide.xml")) {
++        for (name in both) {
 +            val text = layout(name).readText()
 +            assertTrue("$name 的主区要 0dp + weight=1", text.contains("android:layout_height=\"0dp\""))
 +            assertTrue("$name 的主区要 weight", text.contains("android:layout_weight=\"1\""))
@@ -3531,40 +3860,38 @@ index 00000000..34231543
 +    }
 +
 +    @Test
-+    fun `块四行加一条钩子不超过卡片最小高度`() {
-+        val h = SmartLayout.heightDp(
-+            form = SmartLayout.Form.COMPACT,
-+            hasLabel = true, hasDetail = true, hasStatus = true, hooks = 1,
-+        )
-+        assertTrue("$h dp 超了 ${SmartLayout.CARD_HEIGHT_DP}dp", h <= SmartLayout.CARD_HEIGHT_DP)
++    fun `底栏图标数按可用宽度算得出来`() {
++        // 2×2 的卡宽 110dp，扣掉左右内边距剩 82dp
++        val availableWidth = SmartLayout.DEFAULT_HEIGHT_DP - SmartLayout.PAD_H_DP * 2
++        assertTrue("两个图标要放得下", SmartLayout.bottomBarWidthDp(2) <= availableWidth)
++        assertTrue("三个就超了，所以紧凑卡只放两个", SmartLayout.bottomBarWidthDp(3) > availableWidth)
++        // 宽卡至少 220dp，三个图标绰绰有余
++        assertTrue(SmartLayout.bottomBarWidthDp(3) <= SmartLayout.WIDE_MIN_WIDTH_DP - SmartLayout.PAD_H_DP * 2)
 +    }
 +
 +    @Test
-+    fun `底栏三个图标放得下，四个放不下`() {
-+        // 卡的最小宽度也是 110dp：扣掉左右内边距剩 102dp 可用
-+        val availableWidth = SmartLayout.CARD_HEIGHT_DP - SmartLayout.PAD_DP * 2
-+        assertTrue("三个图标要放得下", SmartLayout.bottomBarWidthDp(3) <= availableWidth)
-+        assertTrue("四个图标就超了，所以底栏只有三个位置", SmartLayout.bottomBarWidthDp(4) > availableWidth)
-+    }
++    fun `最紧和最宽的实例都在预算内`() {
++        // 110dp（最紧）：块放四行会超，所以那一档只留「场景 + 标题 + 状态」
++        val tight = SmartLayout.heightOf(SmartLayout.Form.COMPACT, true, false, true, 0)
++        assertTrue("三行 $tight dp 超过 110dp", tight <= SmartLayout.DEFAULT_HEIGHT_DP)
 +
-+    @Test
-+    fun `最坏情况也不超预算`() {
-+        // 块四行 + 三条钩子：超了就得靠降级，降级后必须回到预算内
-+        val worst = SmartLayout.heightDp(SmartLayout.Form.COMPACT, true, true, true, SmartLayout.COMPACT_MAX_HOOKS)
-+        assertTrue("不降级时会超，所以才需要 plan()", worst > SmartLayout.CARD_HEIGHT_DP)
++        // 四行（含细节行）在 110dp 里放不下 —— 所以 plan() 在这一档要砍掉细节行
++        val fourRows = SmartLayout.heightOf(SmartLayout.Form.COMPACT, true, true, true, 0)
++        assertTrue("四行应当放不进最紧的卡", fourRows > SmartLayout.DEFAULT_HEIGHT_DP)
 +
-+        val fits = SmartLayout.heightDp(SmartLayout.Form.COMPACT, true, true, true, 1)
-+        assertEquals(SmartLayout.CARD_HEIGHT_DP, fits)
++        // 四行 + 两条钩子在哪一档都要靠降级，所以 plan() 不是可选项
++        val worst = SmartLayout.heightOf(SmartLayout.Form.COMPACT, true, true, true, SmartLayout.COMPACT_MAX_HOOKS)
++        assertTrue(worst > fourRows)
 +
-+        val wide = SmartLayout.heightDp(SmartLayout.Form.WIDE, true, true, true, SmartLayout.WIDE_MAX_HOOKS)
-+        assertTrue("宽卡的钩子在右栏，不占竖向预算", wide <= SmartLayout.CARD_HEIGHT_DP)
++        // 宽卡的钩子在右栏，不占竖向预算：钩子再多也还是四行那个高度
++        val wide = SmartLayout.heightOf(SmartLayout.Form.WIDE, true, true, true, SmartLayout.WIDE_MAX_HOOKS)
++        assertEquals(fourRows, wide)
 +    }
 +
 +    @Test
 +    fun `长文案在 Kotlin 侧就收住，不指望 ROM 的省略号`() {
-+        // 不同 ROM 的 ellipsize 行为不一致，一行溢出会把下面那行顶掉
 +        assertEquals("短标题", SmartLayout.clamp("短标题", SmartLayout.TITLE_MAX))
-+        assertNull(SmartLayout.clamp("   ", SmartLayout.TITLE_MAX))
++        assertEquals(null, SmartLayout.clamp("   ", SmartLayout.TITLE_MAX))
 +        val long = "高等数学（甲）与大学物理（乙）联合实验课" + "再加几个字"
 +        val clamped = SmartLayout.clamp(long, SmartLayout.TITLE_MAX)!!
 +        assertEquals(SmartLayout.TITLE_MAX, clamped.length)
@@ -3582,7 +3909,7 @@ index 00000000..34231543
 +        )
 +        val plan = SmartLayout.plan(com.xjtu.toolbox.widget.smart.SmartCard(block = block), SmartLayout.Form.COMPACT)
 +        assertEquals("", plan.block.title)
-+        assertTrue(plan.heightDp <= SmartLayout.CARD_HEIGHT_DP)
++        assertTrue(plan.heightDp <= SmartLayout.DEFAULT_HEIGHT_DP)
 +    }
 +
 +    @Test
@@ -3900,7 +4227,7 @@ index b0f9787f..e0b3b894 100644
  }
 diff --git a/docs/smart-widget.md b/docs/smart-widget.md
 new file mode 100644
-index 00000000..e1322238
+index 00000000..b87df698
 --- /dev/null
 +++ b/docs/smart-widget.md
 @@ -0,0 +1,916 @@
