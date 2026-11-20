@@ -2875,7 +2875,7 @@ index 00000000..a7863a52
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBoundaryTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBoundaryTest.kt
 new file mode 100644
-index 00000000..53ed30aa
+index 00000000..bb3ebd81
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBoundaryTest.kt
 @@ -0,0 +1,214 @@
@@ -3006,7 +3006,7 @@ index 00000000..53ed30aa
 +        )
 +        // 15:00 且今天一门课都没有：放假 / 今天没课
 +        assertEquals(
-+            SmartModule.HOLIDAY,
++            "放假",
 +            SmartArbiter.card(facts(nowMinute = 15 * 60, courses = emptyList(), holiday = "校庆")).block.label,
 +        )
 +        // 15:00 课上完了：兜底报余额
@@ -3262,10 +3262,10 @@ index 00000000..52be65ee
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt
 new file mode 100644
-index 00000000..18b211b5
+index 00000000..116182a9
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,161 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.inbox.InboxCategories
@@ -3327,10 +3327,32 @@ index 00000000..18b211b5
 +        checkedAtClock = "10:49",
 +    )
 +
++    /**
++     * 下午三点：今天已经没课，一屏只剩待办 —— 这样主要信息是待办，
++     * 座位 / 余额 / 通知才有机会当钩子（有课时「已查证的迟到」会先占块，见仲裁表第 1 条）。
++     */
++    private fun offClass(
++        todos: List<InboxItem> = emptyList(),
++        balance: String? = null,
++        library: LibrarySeatFact? = null,
++        notice: String? = null,
++    ) = SmartFacts(
++        nowMinute = 15 * 60,
++        nowMs = 1_000_000_000L,
++        courses = listOf(course),
++        date = "2026-11-17",
++        todos = todos,
++        balance = balance,
++        library = library,
++        notice = notice,
++        checkedAgoMin = 60,
++        checkedAtClock = "10:49",
++    )
++
 +    @Test
 +    fun `紧凑卡放不下三条钩子时先砍钩子`() {
 +        val card = SmartArbiter.card(
-+            facts(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
++            offClass(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
 +        )
 +        assertEquals("三条钩子都该被挑出来", 3, card.hooks.size)
 +        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
@@ -3341,7 +3363,7 @@ index 00000000..18b211b5
 +    @Test
 +    fun `砍的时候状态行与标题永不被砍`() {
 +        val card = SmartArbiter.card(
-+            facts(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
++            offClass(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
 +        )
 +        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
 +        assertEquals("实验报告", plan.block.title)
@@ -3352,7 +3374,7 @@ index 00000000..18b211b5
 +    @Test
 +    fun `宽卡右栏能把三条钩子都留下而高度不变`() {
 +        val card = SmartArbiter.card(
-+            facts(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
++            offClass(todos = listOf(todo(30)), balance = "¥128.60", library = seat, notice = "教务 · 新通知"),
 +        )
 +        val compact = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
 +        val wide = SmartLayout.plan(card, SmartLayout.Form.WIDE)
@@ -3382,7 +3404,7 @@ index 00000000..18b211b5
 +    @Test
 +    fun `细节行是可选的那个，可以整行没有`() {
 +        // 待办那一屏只有在知道来源时才有细节行；没有就是没有，不塞占位
-+        val card = SmartArbiter.card(facts(todos = listOf(todo(30, source = "")), balance = "¥9.90"))
++        val card = SmartArbiter.card(offClass(todos = listOf(todo(30, source = "")), balance = "¥9.90"))
 +        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
 +        assertNull("没有来源就没有细节行", plan.block.detail)
 +        assertTrue(plan.heightDp <= SmartLayout.CARD_HEIGHT_DP)
@@ -3521,7 +3543,7 @@ index 00000000..425356cd
 +    }
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
-index b0f9787f..7bfa8448 100644
+index b0f9787f..e0b3b894 100644
 --- a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
 @@ -2,160 +2,206 @@ package com.xjtu.toolbox.widget
@@ -3683,8 +3705,8 @@ index b0f9787f..7bfa8448 100644
 -        // 同一天同一节次、但不是这门课：不能被认成自己的记录
 -        assertEquals("待考勤", scene(10 * 60 + 1, marks(WaterType.NORMAL, name = "大学物理")).status)
 +    fun `查证时刻没给就按上次查的分钟推`() {
-+        // 没有 checkedAtClock（老缓存 / 跨天）时不能空着，按 ago 反推
-+        assertEquals("09:55 查过", block(620, ago = 25, at = null).meta)
++        // 没有 checkedAtClock（老缓存 / 跨天）时不能空着，按 ago 反推：10:20 减 3 分钟
++        assertEquals("10:17 查过", block(620, ago = 3, at = null).meta)
      }
  
      @Test
