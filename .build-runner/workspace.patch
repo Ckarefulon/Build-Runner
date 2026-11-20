@@ -230,7 +230,7 @@ index 17ccbe87..b9aa6761 100644
              WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                  "attendance_widget_sync",
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
-index d95decf7..dcaa7b3a 100644
+index d95decf7..e48d2595 100644
 --- a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 @@ -7,119 +7,72 @@ import android.appwidget.AppWidgetProvider
@@ -397,7 +397,7 @@ index d95decf7..dcaa7b3a 100644
      )
  
      fun requestUpdate(context: Context) {
-@@ -130,63 +83,70 @@ object SmartWidgetUpdater {
+@@ -130,63 +83,71 @@ object SmartWidgetUpdater {
          if (ids.isEmpty()) return
          com.xjtu.toolbox.account.AccountContext.restoreIfNeeded()
          val now = LocalDateTime.now(CampusZoneId)
@@ -470,7 +470,8 @@ index d95decf7..dcaa7b3a 100644
 +            scheduleDiff = runCatching { ScheduleDiff.pending(scheduleDiffStore()) }.getOrNull(),
 +            notice = runCatching {
 +                // 通知没标题可说，只能当钩子（§4 的 M12）：有新的就写一句，没有就不写
-+                NoticeWidgetStore.read(context).entries.firstOrNull()?.let { "教务 · 新通知" }
++                val entries = NoticeWidgetStore.read(context).entries
++                if (entries.isEmpty()) null else "教务 · 新通知"
 +            }.getOrNull(),
          )
 -        // 「正在查询…」只在真正答不上来的那一屏上顶替时效文案：用户点了刷新要能看到反应，
@@ -515,7 +516,7 @@ index d95decf7..dcaa7b3a 100644
      }
  
      /**
-@@ -196,13 +156,13 @@ object SmartWidgetUpdater {
+@@ -196,13 +157,13 @@ object SmartWidgetUpdater {
       * **卡片里绝不登录考勤站点**：小组件会随桌面反复刷新、还会被系统在后台拉起，
       * 为此反复登录既慢又容易被判异常访问。
       *
@@ -533,7 +534,7 @@ index d95decf7..dcaa7b3a 100644
          val termCode = ScheduleWidgetUpdater.currentTermCode(context) ?: return null
          val account = com.xjtu.toolbox.account.AccountContext.activeAccountId
              ?: com.xjtu.toolbox.account.AccountStore().activeAccountId()
-@@ -217,131 +177,162 @@ object SmartWidgetUpdater {
+@@ -217,131 +178,161 @@ object SmartWidgetUpdater {
          return attendanceMarksOf(shard.records)
      }
  
@@ -661,7 +662,6 @@ index d95decf7..dcaa7b3a 100644
 +        SmartKeyKind.RETURN -> R.drawable.ic_widget_return
 +        SmartKeyKind.CANCEL -> R.drawable.ic_widget_cancel
 +        SmartKeyKind.TASK -> R.drawable.ic_widget_task
-+        SmartKeyKind.EMPTY_ROOM -> R.drawable.ic_widget_empty_room
      }
  
      /**
@@ -1562,10 +1562,10 @@ index 00000000..7a788c85
 +}
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt
 new file mode 100644
-index 00000000..6a46a9fa
+index 00000000..dcf429b4
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,169 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +import com.xjtu.toolbox.nav.AppRoute
@@ -1639,10 +1639,13 @@ index 00000000..6a46a9fa
 + *
 + * 只放种类不放图标资源：图标映射在渲染那一侧做，这样仲裁与布局这一整套纯逻辑
 + * 不必依赖 `R`，单测不碰 Android 资源。
++ *
++ * 这里**没有「空教室」**：`EmptyRoomCache` 的键是「周次 + 星期 + 节次」组合，
++ * 卡片冷启动时未必拼得出来，硬做只会显示一个过期的空教室数（M11 留到下一步）。
 + */
 +enum class SmartKeyKind {
 +    ATTENDANCE, REFRESH, QR, SEAT, PAYMENT, CARD, CALENDAR, SCHOOL_CALENDAR,
-+    CHECKIN, INBOX, LEAVE, RETURN, CANCEL, TASK, EMPTY_ROOM,
++    CHECKIN, INBOX, LEAVE, RETURN, CANCEL, TASK,
 +}
 +
 +/** 底栏上的一个键（§5.2）：导航键打开某个页面，动作键后台真做一件事。 */
@@ -1805,10 +1808,10 @@ index 00000000..b0a14b5e
 +}
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt
 new file mode 100644
-index 00000000..58fec718
+index 00000000..851c781b
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,169 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +/**
@@ -1856,6 +1859,18 @@ index 00000000..58fec718
 +    /** 从这个宽度起算「宽卡」（§7.2 / §7.4）。 */
 +    const val WIDE_MIN_WIDTH_DP = 220
 +
++    /**
++     * 各行的字数上限。
++     *
++     * 为什么在 Kotlin 侧截断而不是只靠 `ellipsize="end"`：不同 ROM 的 `TextView` 省略号行为
++     * 不一致（有的把整行抹成「…」，有的干脆溢出到下一行被裁），而卡片只有 110dp 高，
++     * 一行溢出就是把下面那行顶掉。所以**先按字数收一遍**，`ellipsize` 只当第二道保险。
++     */
++    const val TITLE_MAX = 18
++    const val DETAIL_MAX = 22
++    const val STATUS_MAX = 24
++    const val HOOK_MAX = 14
++
 +    /** 两个形态：一套布局一个（成对的 `widget_smart_compact.xml` / `widget_smart_wide.xml`）。 */
 +    enum class Form { COMPACT, WIDE }
 +
@@ -1899,7 +1914,7 @@ index 00000000..58fec718
 +     */
 +    fun plan(card: SmartCard, form: Form): Plan {
 +        val maxHooks = if (form == Form.COMPACT) COMPACT_MAX_HOOKS else WIDE_MAX_HOOKS
-+        val hooks = card.hooks.map { it.text }.take(maxHooks)
++        val hooks = card.hooks.map { clamp(it.text, HOOK_MAX)!! }.take(maxHooks)
 +        val keys = card.keys.take(MAX_KEYS)
 +        var block = card.block
 +
@@ -1918,6 +1933,17 @@ index 00000000..58fec718
 +        // 状态行最后才动；状态要么独占一行，要么这个块整个不出现 —— 绝不和标题挤一行
 +        if (!fits(block, 0)) block = block.copy(status = null, meta = null)
 +
++        // 排版前把长文案收一遍（见 TITLE_MAX 那组常量的注释）。
++        // 状态行按**整句**收：它已经把「结论 + 时效」拼成一句，分开收会把「查于 10:12」截掉，
++        // 那就等于又变回一句没有时刻的断言。
++        block = block.copy(
++            label = clamp(block.label, DETAIL_MAX),
++            title = clamp(block.title, TITLE_MAX)!!,
++            detail = clamp(block.detail, DETAIL_MAX),
++            status = clamp(block.statusLine, STATUS_MAX),
++            meta = null,
++        )
++
 +        return Plan(
 +            form = form,
 +            block = block,
@@ -1931,6 +1957,19 @@ index 00000000..58fec718
 +                hooks = used,
 +            ),
 +        )
++    }
++
++    /**
++     * 按字数收一行字：超了就截断并补一个省略号。
++     *
++     * 只当**排版保险**用，不改语义 —— 所以截断点后面那个省略号很重要：
++     * 少一个字符就少一个字的可信度，用户看到「…」才知道后面还有、不是学校只给了这些。
++     */
++    fun clamp(text: String?, max: Int): String? = when {
++        text.isNullOrBlank() -> null
++        text.length <= max -> text
++        max <= 1 -> "…"
++        else -> text.take(max - 1) + "…"
 +    }
 +
 +    /** 一屏要画的东西（块可能已降级，钩子已按预算裁过）。 */
@@ -2070,31 +2109,6 @@ index 00000000..fc4e977f
 +    <path
 +        android:fillColor="#FFFFFF"
 +        android:pathData="M9.2,16.4 L4.8,12 L3.4,13.4 L9.2,19.2 L20.6,7.8 L19.2,6.4 Z" />
-+
-+</vector>
-diff --git a/app/src/main/res/drawable/ic_widget_empty_room.xml b/app/src/main/res/drawable/ic_widget_empty_room.xml
-new file mode 100644
-index 00000000..3b064a7f
---- /dev/null
-+++ b/app/src/main/res/drawable/ic_widget_empty_room.xml
-@@ -0,0 +1,19 @@
-+<vector xmlns:android="http://schemas.android.com/apk/res/android"
-+    android:width="24dp"
-+    android:height="24dp"
-+    android:viewportWidth="24"
-+    android:viewportHeight="24">
-+<!-- Empty room: a door with a handle. -->
-+    <path
-+        android:fillColor="#00000000"
-+        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="1.6"
-+        android:pathData="M6.4,2 L17.6,2 L17.6,22 L6.4,22 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M13.6,11.4 L15.2,11.4 L15.2,13.4 L13.6,13.4 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M17.6,2 L20.4,2 L20.4,22 L17.6,22 Z" />
 +
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_inbox.xml b/app/src/main/res/drawable/ic_widget_inbox.xml
@@ -3429,14 +3443,15 @@ index 00000000..116182a9
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
 new file mode 100644
-index 00000000..425356cd
+index 00000000..b4ad2337
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,136 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.widget.smart.SmartLayout
 +import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
 +import org.junit.Assert.assertTrue
 +import org.junit.Test
 +import java.io.File
@@ -3540,6 +3555,32 @@ index 00000000..425356cd
 +
 +        val wide = SmartLayout.heightDp(SmartLayout.Form.WIDE, true, true, true, SmartLayout.WIDE_MAX_HOOKS)
 +        assertTrue("宽卡的钩子在右栏，不占竖向预算", wide <= SmartLayout.CARD_HEIGHT_DP)
++    }
++
++    @Test
++    fun `长文案在 Kotlin 侧就收住，不指望 ROM 的省略号`() {
++        // 不同 ROM 的 ellipsize 行为不一致，一行溢出会把下面那行顶掉
++        assertEquals("短标题", SmartLayout.clamp("短标题", SmartLayout.TITLE_MAX))
++        assertNull(SmartLayout.clamp("   ", SmartLayout.TITLE_MAX))
++        val long = "高等数学（甲）与大学物理（乙）联合实验课" + "再加几个字"
++        val clamped = SmartLayout.clamp(long, SmartLayout.TITLE_MAX)!!
++        assertEquals(SmartLayout.TITLE_MAX, clamped.length)
++        assertTrue("截断了就要让人看出来", clamped.endsWith("…"))
++    }
++
++    @Test
++    fun `状态行按整句收，时效不会被单独截掉`() {
++        val block = com.xjtu.toolbox.widget.smart.SmartBlock(
++            module = com.xjtu.toolbox.widget.smart.SmartModule.ATTENDANCE,
++            label = "上课中",
++            title = "高等数学",
++            status = "可能迟到",
++            meta = "上次查于 08:05",
++            route = com.xjtu.toolbox.nav.AppRoute.Attendance,
++        )
++        val card = com.xjtu.toolbox.widget.smart.SmartCard(block = block)
++        val plan = SmartLayout.plan(card, SmartLayout.Form.COMPACT)
++        assertEquals("可能迟到 · 上次查于 08:05", plan.block.statusLine)
 +    }
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetTest.kt
