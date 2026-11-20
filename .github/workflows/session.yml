@@ -148,27 +148,39 @@ jobs:
           echo "emu=$e" >> "$GITHUB_OUTPUT"
           echo "emulator cache key part: $e"
 
-          # Gradle cache paths MUST be byte-identical to the ones run.yml uses.
+          # Gradle cache paths and key MUST be byte-identical to run.yml.
           #
-          # `actions/cache` derives a "version" from the `path` list and only
-          # restores entries with the SAME version. Two workflows naming the same
-          # files differently therefore never share a cache — which is exactly why
-          # this lookup kept reporting "Cache not found" even though the key
-          # prefix matched and the entry sat on the same branch.
+          # `actions/cache` only restores an entry whose "version" (a hash of the
+          # `path` list) AND key both match. Two workflows naming the same files
+          # differently, or deriving a different key, silently keep separate
+          # caches — which is exactly the reported symptom: `run` built fine while
+          # `session` failed on missing dependencies, because the session never
+          # saw the cache that `run` had warmed.
           #
-          # run.yml deliberately narrows the paths (the whole ~/.gradle/caches
-          # archives to ~600 MB and costs ~16s just to unpack; file-hashes,
-          # worker locks and journal-1 are per-run scratch that can never be
-          # reused). Mirroring that list keeps both workflows on one cache.
+          # This mirrors run.yml's `Detect caches` step verbatim: same file list,
+          # same `<lock>-<hash>` key shape, same build-cache-1 inclusion.
+          # Built by concatenation: a literal multi-line value would start a
+          # line at column 0, which YAML reads as a new mapping key.
+          paths="$HOME/.gradle/caches/modules-2"$'\n'"$HOME/.gradle/caches/*/transforms"$'\n'"$HOME/.gradle/caches/*/kotlin-dsl"$'\n'"$HOME/.gradle/wrapper"
+          lock=""
+          for candidate in pnpm-lock.yaml yarn.lock package-lock.json build.gradle.kts build.gradle pom.xml; do
+            if [ -f "$candidate" ]; then lock="$candidate"; break; fi
+          done
+          hash=none
+          if [ -n "$lock" ]; then
+            hash=$(git hash-object "$lock" 2>/dev/null | cut -c1-16)
+            [ -n "$hash" ] || hash=none
+          fi
           {
             echo "gradle_paths<<__BR_PATHS__"
-            echo "$HOME/.gradle/caches/modules-2"
-            echo "$HOME/.gradle/caches/*/transforms"
-            echo "$HOME/.gradle/caches/*/kotlin-dsl"
-            echo "$HOME/.gradle/wrapper"
+            printf '%s\n' "$paths"
+            # run.yml appends the build cache, so the version hash matches only
+            # if this list does too.
+            echo "$HOME/.gradle/caches/build-cache-1"
             echo "__BR_PATHS__"
           } >> "$GITHUB_OUTPUT"
-          echo "gradle 缓存路径已按 run.yml 对齐"
+          echo "cache_key_suffix=gradle-$hash" >> "$GITHUB_OUTPUT"
+          echo "gradle 缓存：$lock @ $hash（与 run.yml 相同）"
           exit 0
 
       - name: Restore Gradle caches
@@ -177,7 +189,7 @@ jobs:
           # Comes from the step above so the path list stays byte-identical to
           # run.yml — that identity is what makes the version hash match.
           path: ${{ steps.scope.outputs.gradle_paths }}
-          key: br-${{ runner.os }}-${{ steps.scope.outputs.scope }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: br-${{ runner.os }}-${{ steps.scope.outputs.scope }}-${{ steps.scope.outputs.cache_key_suffix }}
           restore-keys: |
             br-${{ runner.os }}-${{ steps.scope.outputs.scope }}-
 
