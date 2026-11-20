@@ -230,7 +230,7 @@ index 17ccbe87..b9aa6761 100644
              WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                  "attendance_widget_sync",
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
-index d95decf7..fa20e062 100644
+index d95decf7..645dfef0 100644
 --- a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 @@ -7,119 +7,71 @@ import android.appwidget.AppWidgetProvider
@@ -397,9 +397,12 @@ index d95decf7..fa20e062 100644
      )
  
      fun requestUpdate(context: Context) {
-@@ -130,63 +82,70 @@ object SmartWidgetUpdater {
+@@ -128,65 +80,72 @@ object SmartWidgetUpdater {
+ 
+     internal fun update(context: Context, manager: AppWidgetManager, ids: IntArray) {
          if (ids.isEmpty()) return
-         com.xjtu.toolbox.account.AccountContext.restoreIfNeeded()
+-        com.xjtu.toolbox.account.AccountContext.restoreIfNeeded()
++        com.xjtu.toolbox.account.restoreIfNeeded()
          val now = LocalDateTime.now(CampusZoneId)
 +        val facts = factsOf(context, now)
 +        val card = SmartArbiter.card(facts)
@@ -920,7 +923,7 @@ index 5840d6b5..9caea58e 100644
      }
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
 new file mode 100644
-index 00000000..aa83cbe4
+index 00000000..7a788c85
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
 @@ -0,0 +1,636 @@
@@ -944,7 +947,7 @@ index 00000000..aa83cbe4
 + * - **课 > 饭点**：缺勤改不了，饭可以晚十分钟吃；
 + * - **签到 > 找座**：「待入馆签到」是硬窗口，丢了就是丢了。
 + */
-+object SmartArbiter {
++internal object SmartArbiter {
 +
 +    /** 课前多少分钟开始把「下一节」当成「这一堂」。更早的时候卡片回答的是别的问题。 */
 +    const val CLASS_LEAD_MIN = 20
@@ -1734,7 +1737,7 @@ index 00000000..6a46a9fa
 +)
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartFacts.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartFacts.kt
 new file mode 100644
-index 00000000..b9da5f77
+index 00000000..b0a14b5e
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartFacts.kt
 @@ -0,0 +1,65 @@
@@ -1757,7 +1760,7 @@ index 00000000..b9da5f77
 + * 每一项都允许缺失（null / 空表），因为**拿不到就不画**是这张卡片的底线（§9.1）：
 + * 谁缺了谁那一档退让，绝不画占位符、也绝不把「没数据」显示成「没有事」。
 + */
-+data class SmartFacts(
++internal data class SmartFacts(
 +    /** 距 00:00 的分钟。 */
 +    val nowMinute: Int,
 +    /** 当前时刻（epoch millis）：算待办剩余时间用。 */
