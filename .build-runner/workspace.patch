@@ -3653,10 +3653,10 @@ index 00000000..58f1b447
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt
 new file mode 100644
-index 00000000..28a80ca7
+index 00000000..aaf8faec
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,164 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.inbox.InboxCategories
@@ -3705,6 +3705,7 @@ index 00000000..28a80ca7
 +        library: LibrarySeatFact? = null,
 +        courses: List<WidgetCourse> = listOf(course),
 +        scheduleDiff: String? = null,
++        holiday: String? = null,
 +        evidenceAgo: Int? = 1,
 +    ) = SmartFacts(
 +        nowMinute = nowMinute,
@@ -3715,6 +3716,7 @@ index 00000000..28a80ca7
 +        balance = balance,
 +        library = library,
 +        scheduleDiff = scheduleDiff,
++        holiday = holiday,
 +        checkedAgoMin = evidenceAgo,
 +        checkedAtClock = "10:49",
 +    )
