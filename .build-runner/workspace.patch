@@ -230,7 +230,7 @@ index 17ccbe87..b9aa6761 100644
              WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                  "attendance_widget_sync",
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
-index d95decf7..c5c67a5b 100644
+index d95decf7..3296276a 100644
 --- a/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/SmartWidgetProvider.kt
 @@ -7,119 +7,71 @@ import android.appwidget.AppWidgetProvider
@@ -533,7 +533,7 @@ index d95decf7..c5c67a5b 100644
          val termCode = ScheduleWidgetUpdater.currentTermCode(context) ?: return null
          val account = com.xjtu.toolbox.account.AccountContext.activeAccountId
              ?: com.xjtu.toolbox.account.AccountStore().activeAccountId()
-@@ -217,131 +177,255 @@ object SmartWidgetUpdater {
+@@ -217,131 +177,258 @@ object SmartWidgetUpdater {
          return attendanceMarksOf(shard.records)
      }
  
@@ -621,13 +621,14 @@ index d95decf7..c5c67a5b 100644
 +        manager.updateAppWidget(id, views)
 +    }
 +
-+    /** 一个块的七个 id：容器（整块可点）、场景行、标题、状态、细节，以及块内两个键。 */
++    /** 一个块的八个 id：容器（整块可点）、场景行、标题、状态、两行细节、两个键。 */
 +    private class BlockIds(
 +        val container: Int,
 +        val label: Int,
 +        val title: Int,
 +        val status: Int,
 +        val detail: Int,
++        val detail2: Int,
 +        val keyA: Int,
 +        val keyB: Int,
 +    )
@@ -652,6 +653,7 @@ index d95decf7..c5c67a5b 100644
 +        views.putText(ids.title, block.title)
 +        views.putText(ids.status, block.statusLine)
 +        views.putText(ids.detail, block.detail)
++        views.putText(ids.detail2, block.detail2)
 +        block.statusColor?.let { views.setTextColor(ids.status, it) }
 +
 +        // **块整体是一个点击目标**：点场景/标题/状态/细节都进这件事对应的页面。
@@ -721,7 +723,6 @@ index d95decf7..c5c67a5b 100644
 +        SmartKeyKind.ATTENDANCE -> R.drawable.ic_widget_attendance
 +        SmartKeyKind.QR -> R.drawable.ic_widget_qr
 +        SmartKeyKind.PAYMENT -> R.drawable.ic_widget_payment
-+        SmartKeyKind.CARD -> R.drawable.ic_widget_card
 +        SmartKeyKind.CALENDAR -> R.drawable.ic_widget_calendar
 +        SmartKeyKind.CHECKIN -> R.drawable.ic_widget_checkin
 +        SmartKeyKind.INBOX -> R.drawable.ic_widget_inbox
@@ -836,6 +837,7 @@ index d95decf7..c5c67a5b 100644
 +        title = R.id.widget_smart_title1,
 +        status = R.id.widget_smart_status1,
 +        detail = R.id.widget_smart_detail1,
++        detail2 = R.id.widget_smart_detail1b,
 +        keyA = R.id.widget_smart_key1a,
 +        keyB = R.id.widget_smart_key1b,
 +    )
@@ -846,6 +848,7 @@ index d95decf7..c5c67a5b 100644
 +        title = R.id.widget_smart_title2,
 +        status = R.id.widget_smart_status2,
 +        detail = R.id.widget_smart_detail2,
++        detail2 = R.id.widget_smart_detail2b,
 +        keyA = R.id.widget_smart_key2a,
 +        keyB = R.id.widget_smart_key2b,
 +    )
@@ -894,7 +897,7 @@ index d95decf7..c5c67a5b 100644
          val at = boundaries.filter { it > nowMinute }.minOrNull()
              ?.let { now.toLocalDate().atStartOfDay().plusMinutes(it.toLong()) }
              ?: now.toLocalDate().plusDays(1).atStartOfDay()
-@@ -350,6 +434,7 @@ object SmartWidgetUpdater {
+@@ -350,6 +437,7 @@ object SmartWidgetUpdater {
          context.getSystemService(AlarmManager::class.java)
              ?.setWindow(AlarmManager.RTC, millis, 2 * 60_000L, refreshIntent(context))
      }
@@ -902,7 +905,7 @@ index d95decf7..c5c67a5b 100644
      internal fun cancel(context: Context) {
          context.getSystemService(AlarmManager::class.java)?.cancel(refreshIntent(context))
      }
-@@ -364,7 +449,7 @@ object SmartWidgetUpdater {
+@@ -364,7 +452,7 @@ object SmartWidgetUpdater {
       * 卡片上那颗「刷新」：发一条广播给小组件自己。
       *
       * **不打开 App**：点一下只做「立刻问一次学校 + 重画卡片」，这是用户想要「马上知道」时
@@ -911,7 +914,7 @@ index d95decf7..c5c67a5b 100644
       */
      private fun refreshNowIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
          context, RequestCodes.SMART_WIDGET_REFRESH_NOW,
-@@ -372,18 +457,16 @@ object SmartWidgetUpdater {
+@@ -372,18 +460,16 @@ object SmartWidgetUpdater {
          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
      )
  
@@ -937,7 +940,7 @@ index d95decf7..c5c67a5b 100644
  class SmartWidgetProvider : AppWidgetProvider() {
      private fun updateAsync(context: Context, ids: () -> IntArray) {
          val pending = goAsync()
-@@ -397,25 +480,34 @@ class SmartWidgetProvider : AppWidgetProvider() {
+@@ -397,25 +483,34 @@ class SmartWidgetProvider : AppWidgetProvider() {
          }
      }
  
@@ -993,10 +996,10 @@ index 5840d6b5..9caea58e 100644
      }
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
 new file mode 100644
-index 00000000..5aa0b0f8
+index 00000000..36206793
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
-@@ -0,0 +1,611 @@
+@@ -0,0 +1,624 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +import com.xjtu.toolbox.attendance.WaterType
@@ -1076,9 +1079,10 @@ index 00000000..5aa0b0f8
 +        val cands = candidates(facts)
 +        val first = cands.first()
 +        val second = cands.getOrNull(1)
-+        // 两个块的条件：第二件也得是要紧事（P0/P1）。背景信息（P2：余额、考试、放假）
-+        // 永远只是底部的一条提示 —— 它撑不起半张卡。
-+        val two = second != null && first.rank != SmartRank.P2 && second.rank != SmartRank.P2
++        // 两个块的条件：第二件的**重要程度和第一件相近**（级差不超过一档）。
++        // 「远不如」的（已查证的迟到 vs 余额）就只占一个块，把细节给它，而不是把半张卡
++        // 让给一件可有可无的事。
++        val two = second != null && second.rank.ordinal - first.rank.ordinal <= 1
 +        val blocks = if (two) listOf(first, second) else listOf(first)
 +        return SmartCard(blocks = blocks, hints = hints(facts, blocks))
 +    }
@@ -1196,11 +1200,15 @@ index 00000000..5aa0b0f8
 +        } else {
 +            course.location.ifBlank { timeRange(course) }
 +        }
++        // 第二行细节：上课时间区间（课前那行已经给了地点，上课中那行已经给了还剩多久）
++        val detail2 = timeRange(course).takeIf { it.isNotBlank() && it != detail }
++            ?: course.location.takeIf { it.isNotBlank() && it != detail }
 +        return SmartBlock(
 +            module = SmartModule.ATTENDANCE,
 +            label = label,
 +            title = course.name,
 +            detail = detail,
++            detail2 = detail2,
 +            status = outcome.status,
 +            statusColor = outcome.color,
 +            evidence = outcome.evidence,
@@ -1231,26 +1239,28 @@ index 00000000..5aa0b0f8
 +        route = AppRoute.Schedule,
 +    )
 +
-+    /** M3 校园卡：饭点报余额并给付款码入口；余额那份缓存带更新时刻，照实标。 */
++    /**
++     * M3 校园卡。饭点与兜底用的是同一个块，**route 一律是校园卡页**，键一律是「付款码」——
++     * 块的文字点开就是校园卡，再放一颗「校园卡」图标就是重复入口（这条是真机反馈踩过的）。
++     */
 +    private fun mealBlock(facts: SmartFacts, label: String): SmartBlock = SmartBlock(
 +        module = SmartModule.CAMPUS_CARD,
 +        label = label,
 +        title = facts.balance ?: "--",
-+        detail = listOfNotNull(
-+            facts.todaySpend?.let { "今日消费 $it" },
-+            facts.balanceClock?.let { "更新于 $it" },
-+        ).joinToString(" · ").ifBlank { null },
++        detail = facts.todaySpend?.let { "今日消费 $it" },
++        detail2 = facts.balanceClock?.let { "更新于 $it" },
 +        rank = SmartRank.P1,
 +        anchor = facts.nowMinute,
-+        route = AppRoute.PaymentCode,
++        route = AppRoute.CampusCard,
 +    )
 +
-+    /** 兜底：课上完了 / 没课可报时，报余额。点它去校园卡页。 */
++    /** 兜底：课上完了 / 没课可报时，报余额。 */
 +    private fun balanceBlock(facts: SmartFacts): SmartBlock = SmartBlock(
 +        module = SmartModule.CAMPUS_CARD,
 +        label = "校园卡",
 +        title = facts.balance ?: "余额未同步",
 +        detail = facts.balanceClock?.let { "更新于 $it" },
++        detail2 = facts.todaySpend?.let { "今日消费 $it" },
 +        rank = SmartRank.P2,
 +        anchor = facts.nowMinute,
 +        route = AppRoute.CampusCard,
@@ -1264,6 +1274,12 @@ index 00000000..5aa0b0f8
 +            label = if (left <= TODO_P0_MIN) "快截止" else "待办",
 +            title = todo.title.ifBlank { todo.source.ifBlank { "待办" } },
 +            detail = todo.source.ifBlank { null },
++            // 状态已经写了「还有多久」，第二行给「截止时刻」这类补充事实
++            detail2 = if (todo.expiresAt > 0L && left < 24 * 60) {
++                "${clock(facts.minuteOf(todo.expiresAt))} 截止"
++            } else {
++                null
++            },
 +            status = deadlineText(facts, todo),
 +            statusColor = if (left <= TODO_P0_MIN) COLOR_ABSENT else null,
 +            rank = if (left <= TODO_P0_MIN) SmartRank.P0 else SmartRank.P1,
@@ -1278,6 +1294,7 @@ index 00000000..5aa0b0f8
 +        label = "图书馆",
 +        title = "座位 ${lib.seat}",
 +        detail = lib.area.ifBlank { null },
++        detail2 = lib.actions.takeIf { it.isNotEmpty() }?.let { "可做：${it.first()}" },
 +        status = lib.status.ifBlank { null },
 +        statusColor = when (lib.status) {
 +            "使用中" -> COLOR_NORMAL
@@ -1361,33 +1378,32 @@ index 00000000..5aa0b0f8
 +    /**
 +     * 一个块里的键：**只放这个块到不了的地方，或一个动作**。
 +     *
-+     * 最多两个（块内那一行只排得下两个 18dp 图标 + 间距）。刷新不在这里 —— 它在底部条右侧，
-+     * 位置固定，每个场景都找得到。
++     * 一条结构性保证写在最后：**任何导航键都不许指向这个块自己打开的那个页面** ——
++     * 那正是「点文字能到、还多摆一个图标」的重复入口。以前靠约定，现在靠这行过滤。
++     *
++     * 最多两个（块内那一行只排得下两个 18dp 图标 + 间距）。刷新不在这里 —— 它在底部条右侧。
 +     */
-+    fun keysOf(block: SmartBlock, facts: SmartFacts): List<SmartKey> = when (block.module) {
-+        // 点块进考勤页；扫码是它到不了的地方
-+        SmartModule.ATTENDANCE -> listOf(NavKey(SmartKeyKind.QR, "扫码", AppRoute.QrScan))
-+        // 点块进日程；查考勤是另一件事
-+        SmartModule.NEXT_CLASS -> listOf(NavKey(SmartKeyKind.ATTENDANCE, "考勤", AppRoute.Attendance))
-+        // 点块进那条待办自己；收纳是另一件事（块本身就落在收纳时就不用补了）
-+        SmartModule.TODO -> if (block.route == AppRoute.Inbox) emptyList()
-+        else listOf(NavKey(SmartKeyKind.INBOX, "收纳", AppRoute.Inbox))
-+        // 点块进图书馆页；座位动作要靠落盘的 actionUrls
-+        SmartModule.LIBRARY -> libraryKeys(facts.library)
-+        // 饭点那一屏点块打开付款码 ⇒ 补校园卡；兜底那一屏反过来
-+        SmartModule.CAMPUS_CARD -> if (block.route == AppRoute.PaymentCode) {
-+            listOf(NavKey(SmartKeyKind.CARD, "校园卡", AppRoute.CampusCard))
-+        } else {
-+            listOf(NavKey(SmartKeyKind.PAYMENT, "付款码", AppRoute.PaymentCode))
-+        }
-+        // 放假 / 今天没课点块进校历 ⇒ 补日程；「今天的课上完了」点块进校园卡 ⇒ 补付款码
-+        SmartModule.HOLIDAY -> if (block.route == AppRoute.SchoolCalendar) {
-+            listOf(NavKey(SmartKeyKind.CALENDAR, "日程", AppRoute.Schedule))
-+        } else {
-+            listOf(NavKey(SmartKeyKind.PAYMENT, "付款码", AppRoute.PaymentCode))
-+        }
-+        SmartModule.EXAM, SmartModule.SCHEDULE_DIFF, SmartModule.NOTICE -> emptyList()
-+    }
++    fun keysOf(block: SmartBlock, facts: SmartFacts): List<SmartKey> =
++        when (block.module) {
++            // 点块进考勤页；扫码是它到不了的地方
++            SmartModule.ATTENDANCE -> listOf(NavKey(SmartKeyKind.QR, "扫码", AppRoute.QrScan))
++            // 点块进日程；查考勤是另一件事
++            SmartModule.NEXT_CLASS -> listOf(NavKey(SmartKeyKind.ATTENDANCE, "考勤", AppRoute.Attendance))
++            // 点块进那条待办自己；收纳是另一件事（块本身就落在收纳时就不用补了）
++            SmartModule.TODO -> if (block.route == AppRoute.Inbox) emptyList()
++            else listOf(NavKey(SmartKeyKind.INBOX, "收纳", AppRoute.Inbox))
++            // 点块进图书馆页；座位动作要靠落盘的 actionUrls
++            SmartModule.LIBRARY -> libraryKeys(facts.library)
++            // 点块进校园卡页 ⇒ 唯一的动作键是「付款码」
++            SmartModule.CAMPUS_CARD -> listOf(NavKey(SmartKeyKind.PAYMENT, "付款码", AppRoute.PaymentCode))
++            // 放假 / 今天没课点块进校历 ⇒ 补日程；「今天的课上完了」点块进校园卡 ⇒ 补付款码
++            SmartModule.HOLIDAY -> if (block.route == AppRoute.SchoolCalendar) {
++                listOf(NavKey(SmartKeyKind.CALENDAR, "日程", AppRoute.Schedule))
++            } else {
++                listOf(NavKey(SmartKeyKind.PAYMENT, "付款码", AppRoute.PaymentCode))
++            }
++            SmartModule.EXAM, SmartModule.SCHEDULE_DIFF, SmartModule.NOTICE -> emptyList()
++        }.filterNot { it is NavKey && it.route == block.route }
 +
 +    /**
 +     * 图书馆那个块的键：**动作键只能执行「预约当前真的有这个按钮」的那个动作**。
@@ -1610,10 +1626,10 @@ index 00000000..5aa0b0f8
 +}
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt
 new file mode 100644
-index 00000000..e9b41808
+index 00000000..4b600a36
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartCard.kt
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,179 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +import com.xjtu.toolbox.nav.AppRoute
@@ -1688,7 +1704,7 @@ index 00000000..e9b41808
 + * 「刷新」也不在这里：它在底部条最右，位置固定、每个场景都在。
 + */
 +enum class SmartKeyKind {
-+    ATTENDANCE, QR, PAYMENT, CARD, CALENDAR,
++    ATTENDANCE, QR, PAYMENT, CALENDAR,
 +    CHECKIN, INBOX, LEAVE, RETURN, CANCEL,
 +}
 +
@@ -1736,7 +1752,10 @@ index 00000000..e9b41808
 +    val module: SmartModule,
 +    val label: String?,
 +    val title: String,
++    /** 第一行细节（随情境变：地点 / 还剩多久 / 今日消费…）。 */
 +    val detail: String? = null,
++    /** 第二行细节：一个块独占整张卡时用它把卡填满（时间区间、更新时刻、考场…）。 */
++    val detail2: String? = null,
 +    val status: String? = null,
 +    val statusColor: Int? = null,
 +    val evidence: SmartEvidence = SmartEvidence.RECORDED,
@@ -1747,13 +1766,13 @@ index 00000000..e9b41808
 +    val anchor: Int = 0,
 +    /** 点这一块去哪儿。 */
 +    val route: AppRoute,
-+    /** 这个块自己的快捷键（最多两个，刷新在底部条上）。 */
++    /** 这个块自己的快捷键（最多两个，刷新在底部条上）。**不许指向 [route] 自己。** */
 +    val keys: List<SmartKey> = emptyList(),
 +) {
 +    /**
 +     * 状态行实际画出来的那句话：**状态 + 时效**。
 +     *
-+     * 拼成一行是有意的：分开两行的话，140dp 的紧凑卡放不下，而时效又是这句话的一部分 ——
++     * 拼成一行是有意的：分开两行的话紧凑卡放不下，而时效又是这句话的一部分 ——
 +     * 「迟到」离开时刻就是一句过期的断言。
 +     */
 +    val statusLine: String?
@@ -1763,11 +1782,18 @@ index 00000000..e9b41808
 +            else -> "$status · $meta"
 +        }
 +
-+    /** 块要多高：[withDetail] 时多一行细节。 */
-+    fun heightDp(withDetail: Boolean): Int =
-+        SmartLayout.BLOCK_LEAD_DP + SmartLayout.BLOCK_TITLE_DP +
-+            (if (statusLine != null) SmartLayout.BLOCK_GAP_DP + SmartLayout.BLOCK_STATUS_DP else 0) +
-+            (if (withDetail && !detail.isNullOrBlank()) SmartLayout.BLOCK_GAP_DP + SmartLayout.BLOCK_DETAIL_DP else 0)
++    /** 这个块要几行：[details] 是细节行数（0/1/2）。 */
++    fun heightDp(details: Int): Int {
++        var h = SmartLayout.BLOCK_LEAD_DP + SmartLayout.BLOCK_TITLE_DP
++        if (statusLine != null) h += SmartLayout.BLOCK_GAP_DP + SmartLayout.BLOCK_STATUS_DP
++        if (details >= 1) h += SmartLayout.BLOCK_GAP_DP + SmartLayout.BLOCK_DETAIL_DP
++        if (details >= 2) h += SmartLayout.BLOCK_GAP_DP + SmartLayout.BLOCK_DETAIL_DP
++        return h
++    }
++
++    /** 这个块最多能写几行细节。 */
++    val detailCount: Int
++        get() = (if (!detail.isNullOrBlank()) 1 else 0) + (if (!detail2.isNullOrBlank()) 1 else 0)
 +}
 +
 +/** 一条次要提示：写在卡片最底下那一条，与「刷新」并排。 */
@@ -1856,10 +1882,10 @@ index 00000000..b0a14b5e
 +}
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt
 new file mode 100644
-index 00000000..80b7fa02
+index 00000000..d680afb7
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartLayout.kt
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,258 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +/**
@@ -1972,8 +1998,13 @@ index 00000000..80b7fa02
 +    /**
 +     * 落成一屏实际要渲染的东西。
 +     *
-+     * @param availableHeightDp 这个实例实际分到的高度（`OPTION_APPWIDGET_MIN_HEIGHT`）；
-+     *   拿不到时给 [DEFAULT_HEIGHT_DP]，此时按最紧的预算排。
++     * 三条伸缩规则（对着「一块占满 / 两块各半」而设计）：
++     * 1. **块数**：两个块放得下就放两个（各占一半），放不下就退回一个；
++     * 2. **细节行**：每个块能写几行细节由它分到的高度决定（0/1/2 行）——
++     *    一个块独占整张卡时写两行，把卡填满，而不是把三行字摆在正中间、上下都空着；
++     * 3. **底部那条**：按宽度拼提示，装不下就少一条。
++     *
++     * @param availableHeightDp 这个实例实际分到的高度（`OPTION_APPWIDGET_MIN_HEIGHT`）。
 +     * @param availableWidthDp 这个实例实际的宽度（`OPTION_APPWIDGET_MIN_WIDTH`）。
 +     */
 +    fun plan(
@@ -1985,29 +2016,27 @@ index 00000000..80b7fa02
 +        val height = availableHeightDp.coerceAtLeast(DEFAULT_HEIGHT_DP)
 +        val textW = textWidthDp(form, availableWidthDp)
 +
-+        // ① 两个块放不放得下：放不下就只留第一个（更重要的那个），把省下的高度给它做细节行
++        // ① 两个块放不放得下
 +        var blocks = card.blocks.take(2)
-+        var twoFit = blocks.size == 2 &&
-+            blockBudgetDp(form, 2, height) >= blocks[0].minHeight()
-+        if (!twoFit) blocks = blocks.take(1)
++        if (blocks.size == 2 && blockBudgetDp(form, 2, height) < blocks[0].minHeight()) {
++            blocks = blocks.take(1)
++        }
 +
-+        // ② 每块要不要细节行：块高够就写（两块并排时高度不叠加，上下堆时已经除过二）
++        // ② 每块能写几行细节
 +        val budget = blockBudgetDp(form, blocks.size, height)
-+        val fits = blocks.map { b -> b.heightDp(withDetail = true) <= budget }
-+
-+        // ③ 收字：按宽度、按行
-+        val rendered = blocks.mapIndexed { i, b ->
-+            val withDetail = fits[i] && !b.detail.isNullOrBlank()
++        val rendered = blocks.map { b ->
++            val details = (b.detailCount downTo 0).firstOrNull { n -> b.heightDp(n) <= budget } ?: 0
 +            RenderedBlock(
 +                block = b.copy(
 +                    label = fit(b.label, textW, SIZE_LABEL, DETAIL_MAX),
 +                    title = fit(b.title, textW, SIZE_TITLE, TITLE_MAX).orEmpty(),
-+                    detail = if (withDetail) fit(b.detail, textW, SIZE_DETAIL, DETAIL_MAX) else null,
++                    detail = if (details >= 1) fit(b.detail, textW, SIZE_DETAIL, DETAIL_MAX) else null,
++                    detail2 = if (details >= 2) fit(b.detail2, textW, SIZE_DETAIL, DETAIL_MAX) else null,
 +                    status = fit(b.statusLine, textW, SIZE_STATUS, STATUS_MAX),
 +                    meta = null,
 +                    keys = b.keys.take(MAX_KEYS),
 +                ),
-+                withDetail = withDetail,
++                details = details,
 +            )
 +        }
 +
@@ -2016,7 +2045,7 @@ index 00000000..80b7fa02
 +            blocks = rendered,
 +            twoBlocks = rendered.size == 2,
 +            hint = hintLine(card.hints, textW),
-+            heightDp = heightOf(form, rendered.map { it.block.heightDp(it.withDetail) }),
++            heightDp = heightOf(form, rendered.map { it.block.heightDp(it.details) }),
 +        )
 +    }
 +
@@ -2101,10 +2130,10 @@ index 00000000..80b7fa02
 +    }
 +
 +    /** 一个块最少要占多高：场景行 + 标题 + 状态（没有状态时更矮）。 */
-+    private fun SmartBlock.minHeight(): Int = heightDp(withDetail = false)
++    private fun SmartBlock.minHeight(): Int = heightDp(details = 0)
 +
-+    /** 渲染一个块要用的东西。 */
-+    data class RenderedBlock(val block: SmartBlock, val withDetail: Boolean)
++    /** 渲染一个块要用的东西：块本身 + 它这次写了几行细节。 */
++    data class RenderedBlock(val block: SmartBlock, val details: Int)
 +
 +    /** 一屏要画的东西。 */
 +    data class Plan(
@@ -2240,31 +2269,6 @@ index 00000000..187e6925
 +        android:strokeLineCap="round"
 +        android:strokeLineJoin="round"
 +        android:pathData="M16.60,7.40 L7.40,16.60" />
-+</vector>
-diff --git a/app/src/main/res/drawable/ic_widget_card.xml b/app/src/main/res/drawable/ic_widget_card.xml
-new file mode 100644
-index 00000000..f5d48836
---- /dev/null
-+++ b/app/src/main/res/drawable/ic_widget_card.xml
-@@ -0,0 +1,19 @@
-+<vector xmlns:android="http://schemas.android.com/apk/res/android"
-+    android:width="24dp"
-+    android:height="24dp"
-+    android:viewportWidth="24"
-+    android:viewportHeight="24">
-+    <path
-+        android:fillColor="#00000000"
-+        android:strokeColor="#FFFFFF"
-+        android:strokeWidth="2"
-+        android:strokeLineCap="round"
-+        android:strokeLineJoin="round"
-+        android:pathData="M3.40,6.40 L20.60,6.40 L20.60,17.60 L3.40,17.60 L3.40,6.40" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M3.60,9.20 L20.40,9.20 L20.40,11.20 L3.60,11.20 Z" />
-+    <path
-+        android:fillColor="#FFFFFF"
-+        android:pathData="M6.40,13.00 L9.40,13.00 L9.40,15.80 L6.40,15.80 Z" />
 +</vector>
 diff --git a/app/src/main/res/drawable/ic_widget_checkin.xml b/app/src/main/res/drawable/ic_widget_checkin.xml
 new file mode 100644
@@ -2630,10 +2634,10 @@ index 76fd1fb6..00000000
 -</LinearLayout>
 diff --git a/app/src/main/res/layout/widget_smart_compact.xml b/app/src/main/res/layout/widget_smart_compact.xml
 new file mode 100644
-index 00000000..3e0f1cfe
+index 00000000..b8f1beb1
 --- /dev/null
 +++ b/app/src/main/res/layout/widget_smart_compact.xml
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,274 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!--
 +  智能卡片 · 紧凑形态（2×2，宽 < 220dp）。
@@ -2748,6 +2752,19 @@ index 00000000..3e0f1cfe
 +            android:textColor="@color/widget_on_surface_secondary"
 +            android:textSize="11sp"
 +            android:visibility="gone" />
++
++        <!-- 第二行细节：一个块独占整张卡时用它把卡填满（时间区间 / 今日消费 / 考场…） -->
++        <TextView
++            android:id="@+id/widget_smart_detail1b"
++            android:layout_width="match_parent"
++            android:layout_height="15dp"
++            android:layout_marginTop="1dp"
++            android:ellipsize="end"
++            android:includeFontPadding="false"
++            android:maxLines="1"
++            android:textColor="@color/widget_on_surface_secondary"
++            android:textSize="11sp"
++            android:visibility="gone" />
 +    </LinearLayout>
 +
 +    <!-- 两块之间那条横线（只有一个块时 GONE） -->
@@ -2833,6 +2850,18 @@ index 00000000..3e0f1cfe
 +
 +        <TextView
 +            android:id="@+id/widget_smart_detail2"
++            android:layout_width="match_parent"
++            android:layout_height="15dp"
++            android:layout_marginTop="1dp"
++            android:ellipsize="end"
++            android:includeFontPadding="false"
++            android:maxLines="1"
++            android:textColor="@color/widget_on_surface_secondary"
++            android:textSize="11sp"
++            android:visibility="gone" />
++
++        <TextView
++            android:id="@+id/widget_smart_detail2b"
 +            android:layout_width="match_parent"
 +            android:layout_height="15dp"
 +            android:layout_marginTop="1dp"
@@ -3014,10 +3043,10 @@ index 00000000..e2142e7f
 +</LinearLayout>
 diff --git a/app/src/main/res/layout/widget_smart_wide.xml b/app/src/main/res/layout/widget_smart_wide.xml
 new file mode 100644
-index 00000000..e63a6908
+index 00000000..5ba2f2da
 --- /dev/null
 +++ b/app/src/main/res/layout/widget_smart_wide.xml
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,264 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<!--
 +  智能卡片 · 宽形态（4×2，宽 ≥ 220dp）。
@@ -3123,6 +3152,19 @@ index 00000000..e63a6908
 +                android:textColor="@color/widget_on_surface_secondary"
 +                android:textSize="11sp"
 +                android:visibility="gone" />
++
++            <!-- 第二行细节：块独占时把卡填满（时间区间 / 今日消费 / 考场…） -->
++            <TextView
++                android:id="@+id/widget_smart_detail1b"
++                android:layout_width="match_parent"
++                android:layout_height="15dp"
++                android:layout_marginTop="1dp"
++                android:ellipsize="end"
++                android:includeFontPadding="false"
++                android:maxLines="1"
++                android:textColor="@color/widget_on_surface_secondary"
++                android:textSize="11sp"
++                android:visibility="gone" />
 +        </LinearLayout>
 +
 +        <!-- 两块之间那条竖线（只有一个块时 GONE） -->
@@ -3217,6 +3259,18 @@ index 00000000..e63a6908
 +                android:textColor="@color/widget_on_surface_secondary"
 +                android:textSize="11sp"
 +                android:visibility="gone" />
++
++            <TextView
++                android:id="@+id/widget_smart_detail2b"
++                android:layout_width="match_parent"
++                android:layout_height="15dp"
++                android:layout_marginTop="1dp"
++                android:ellipsize="end"
++                android:includeFontPadding="false"
++                android:maxLines="1"
++                android:textColor="@color/widget_on_surface_secondary"
++                android:textSize="11sp"
++                android:visibility="gone" />
 +        </LinearLayout>
 +    </LinearLayout>
 +
@@ -3290,10 +3344,10 @@ index ed54650e..f1ca900d 100644
      android:widgetCategory="home_screen" />
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBlockTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBlockTest.kt
 new file mode 100644
-index 00000000..386e98dd
+index 00000000..41e834fc
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBlockTest.kt
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,124 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.inbox.InboxCategories
@@ -3397,39 +3451,33 @@ index 00000000..386e98dd
 +    }
 +
 +    @Test
-+    fun `高度够两个块就排两个，高度不够退回一个`() {
-+        val card = SmartArbiter.card(facts(nowMinute = 650, todos = listOf(todo(60))))
-+        assertEquals(2, card.blocks.size)
-+
-+        // 110dp：两块各只剩 34dp，放不下 → 退回一个，并把省下的高度给它做细节行
-+        val tight = SmartLayout.plan(card, SmartLayout.Form.COMPACT, 110, 172)
-+        assertEquals(1, tight.blocks.size)
-+        assertFalse(tight.twoBlocks)
-+
-+        // 160dp：两块各 56dp，够放「场景+标题+状态」
-+        val tall = SmartLayout.plan(card, SmartLayout.Form.COMPACT, 160, 172)
-+        assertEquals(2, tall.blocks.size)
-+        assertTrue(tall.twoBlocks)
++    fun `一块占满时把细节写满，不留大片空白`() {
++        val card = SmartArbiter.card(facts(nowMinute = 650))
++        // 110dp：块预算 69dp，只放得下三行（场景 + 标题 + 状态）
++        assertEquals(0, SmartLayout.plan(card, SmartLayout.Form.COMPACT, 110, 172).blocks.first().details)
++        // 140dp：块预算 99dp，五行（含两行细节）都放得下 —— 卡片被填满
++        val roomy = SmartLayout.plan(card, SmartLayout.Form.COMPACT, 140, 172).blocks.first()
++        assertEquals(2, roomy.details)
++        assertEquals("还剩 70 分钟", roomy.block.detail)
++        assertEquals("10:10–12:00", roomy.block.detail2)
 +    }
 +
 +    @Test
-+    fun `大块才给细节行`() {
-+        val card = SmartArbiter.card(facts(nowMinute = 650))
-+        // 110dp 一个块：块预算 69dp，四行 71dp 放不下 → 细节行让位
-+        assertTrue(SmartLayout.plan(card, SmartLayout.Form.COMPACT, 110, 172).blocks.first().block.detail == null)
-+        // 140dp：块预算 99dp，四行 71dp 放得下
-+        assertEquals(
-+            "还剩 70 分钟",
-+            SmartLayout.plan(card, SmartLayout.Form.COMPACT, 140, 172).blocks.first().block.detail,
-+        )
++    fun `两个块的判定看重要程度是否相近`() {
++        // 上课中（P1）+ 待办（P0/P1）：相近 ⇒ 两个块
++        assertEquals(2, SmartArbiter.card(facts(nowMinute = 650, todos = listOf(todo(60)))).blocks.size)
++        // 已查证的迟到（P0）+ 余额（P2）：差两档 ⇒ 只一个块，细节交给它
++        val late = SmartArbiter.card(facts(nowMinute = 650, balance = "¥128.60"))
++        assertEquals(1, late.blocks.size)
++        assertTrue("余额降级成底部提示", late.hints.any { it.module == SmartModule.CAMPUS_CARD })
 +    }
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBoundaryTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBoundaryTest.kt
 new file mode 100644
-index 00000000..a1110ace
+index 00000000..58f1b447
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetBoundaryTest.kt
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,173 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.inbox.InboxCategories
@@ -3503,7 +3551,8 @@ index 00000000..a1110ace
 +
 +    @Test
 +    fun `课优先于饭点`() {
-+        // 11:10-12:00 的第 4 节与午饭窗口重叠：缺勤改不了，饭可以晚十分钟吃
++        // 11:10-12:00 的第 4 节与午饭窗口重叠：缺勤改不了，饭可以晚十分钟吃 ——
++        // 课排第一个块；饭点那件事在矮卡里退成底部提示，在高一点的卡里才占第二个块
 +        val lunch = WidgetCourse(
 +            name = "大学物理", location = "主楼B-201",
 +            startMinute = 670, endMinute = 720, color = 0, startSection = 4, endSection = 4,
@@ -3511,8 +3560,13 @@ index 00000000..a1110ace
 +        val card = SmartArbiter.card(facts(nowMinute = 11 * 60 + 30, courses = listOf(lunch), balance = "¥128.60"))
 +        assertEquals(SmartModule.ATTENDANCE, card.blocks.first().module)
 +        assertEquals("上课中", card.blocks.first().label)
-+        // 饭点降为底部提示：余额还在，只是不占块
-+        assertTrue("余额该降级成提示", card.hints.any { it.module == SmartModule.CAMPUS_CARD })
++
++        // 150dp 的 2×2：只排一个块，余额落到底部提示
++        val plan = com.xjtu.toolbox.widget.smart.SmartLayout.plan(
++            card, com.xjtu.toolbox.widget.smart.SmartLayout.Form.COMPACT, 150, 172,
++        )
++        assertEquals(1, plan.blocks.size)
++        assertTrue("余额该退成提示", (plan.hint ?: "").contains("余额"))
 +    }
 +
 +    @Test
@@ -3599,10 +3653,10 @@ index 00000000..a1110ace
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt
 new file mode 100644
-index 00000000..792de157
+index 00000000..28a80ca7
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetButtonTest.kt
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,162 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.inbox.InboxCategories
@@ -3684,14 +3738,37 @@ index 00000000..792de157
 +    }
 +
 +    @Test
-+    fun `饭点那个块补校园卡，兜底那个块补付款码`() {
++    fun `校园卡那个块只给付款码，绝不再摆一颗校园卡图标`() {
++        // 点文字进的就是校园卡页，再放「校园卡」图标就是重复入口（真机反馈踩过）
 +        val meal = firstKeys(facts(nowMinute = 11 * 60 + 30, courses = emptyList(), balance = "¥12.30"))
-+        assertEquals(listOf(SmartKeyKind.CARD), kinds(meal))
-+        assertEquals(AppRoute.CampusCard, (meal.first() as NavKey).route)
++        assertEquals(listOf(SmartKeyKind.PAYMENT), kinds(meal))
++        assertEquals(AppRoute.PaymentCode, (meal.first() as NavKey).route)
 +
++        // 兜底那个块同理
 +        val done = firstKeys(facts(nowMinute = 15 * 60, balance = "¥8.00"))
 +        assertEquals(listOf(SmartKeyKind.PAYMENT), kinds(done))
-+        assertEquals(AppRoute.PaymentCode, (done.first() as NavKey).route)
++    }
++
++    @Test
++    fun `任何块里的导航键都不会指向这个块自己打开的页面`() {
++        val scenes = listOf(
++            facts(),
++            facts(nowMinute = 9 * 60 + 30),
++            facts(nowMinute = 11 * 60 + 30, courses = emptyList(), balance = "¥12.30"),
++            facts(nowMinute = 15 * 60, balance = "¥8.00"),
++            facts(nowMinute = 900, todos = listOf(todo(59))),
++            facts(nowMinute = 15 * 60, courses = emptyList(), holiday = "校庆"),
++            facts(nowMinute = 15 * 60, scheduleDiff = "高等数学换教室"),
++        )
++        scenes.forEach { f ->
++            SmartArbiter.card(f).blocks.forEach { b ->
++                b.keys.forEach { k ->
++                    if (k is NavKey) {
++                        assertTrue("${b.module} 的键指向了块自己打开的页面", k.route != b.route)
++                    }
++                }
++            }
++        }
 +    }
 +
 +    @Test
@@ -3744,7 +3821,7 @@ index 00000000..792de157
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt
 new file mode 100644
-index 00000000..37586e21
+index 00000000..b202abcd
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetCapacityTest.kt
 @@ -0,0 +1,135 @@
@@ -3811,15 +3888,15 @@ index 00000000..37586e21
 +    fun `最紧的实例只放一个块，细节行让位`() {
 +        val plan = SmartLayout.plan(busy(), SmartLayout.Form.COMPACT, 110, 172)
 +        assertEquals(1, plan.blocks.size)
-+        assertTrue(plan.blocks.first().block.detail == null)
++        assertEquals(0, plan.blocks.first().details)
 +        assertTrue("110dp 放不下两个块", !plan.twoBlocks)
 +    }
 +
 +    @Test
-+    fun `常见的 2×2 能放下一个完整的块`() {
++    fun `常见的 2×2 能把两行细节都写出来`() {
 +        val plan = SmartLayout.plan(busy(), SmartLayout.Form.COMPACT, 140, 172)
 +        assertEquals(1, plan.blocks.size)
-+        assertTrue("细节行回来了", plan.blocks.first().withDetail)
++        assertEquals(2, plan.blocks.first().details)
 +    }
 +
 +    @Test
@@ -3828,15 +3905,15 @@ index 00000000..37586e21
 +        assertEquals(2, plan.blocks.size)
 +        assertTrue(plan.twoBlocks)
 +        // 两块的预算只有 56dp，只放得下「场景 + 标题 + 状态」
-+        assertFalse(plan.blocks[0].withDetail)
-+        assertFalse(plan.blocks[1].withDetail)
++        assertEquals(0, plan.blocks[0].details)
++        assertEquals(0, plan.blocks[1].details)
 +    }
 +
 +    @Test
-+    fun `宽卡两块并排，各拿满高`() {
++    fun `宽卡两块并排，各拿满高、细节写满`() {
 +        val plan = SmartLayout.plan(busy(), SmartLayout.Form.WIDE, 140, 344)
 +        assertEquals(2, plan.blocks.size)
-+        assertTrue("并排时各自的高度都是满高，细节行留得住", plan.blocks.all { it.withDetail })
++        assertTrue("并排时两块各拿满高", plan.blocks.all { it.details == 2 })
 +    }
 +
 +    @Test
@@ -3885,10 +3962,10 @@ index 00000000..37586e21
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
 new file mode 100644
-index 00000000..f435c3e1
+index 00000000..c07a9e60
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,156 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.widget.smart.SmartLayout
@@ -3929,22 +4006,24 @@ index 00000000..f435c3e1
 +
 +    @Test
 +    fun `布局里写死的行高与预算常量逐条一致`() {
-+        val expected = mapOf(
-+            "widget_smart_label1" to SmartLayout.BLOCK_LEAD_DP,
-+            "widget_smart_title1" to SmartLayout.BLOCK_TITLE_DP,
-+            "widget_smart_status1" to SmartLayout.BLOCK_STATUS_DP,
-+            "widget_smart_detail1" to SmartLayout.BLOCK_DETAIL_DP,
-+            "widget_smart_label2" to SmartLayout.BLOCK_LEAD_DP,
-+            "widget_smart_title2" to SmartLayout.BLOCK_TITLE_DP,
-+            "widget_smart_status2" to SmartLayout.BLOCK_STATUS_DP,
-+            "widget_smart_detail2" to SmartLayout.BLOCK_DETAIL_DP,
-+            "widget_smart_bottom_divider" to SmartLayout.DIVIDER_DP,
-+            "widget_smart_key1a" to SmartLayout.KEY_ICON_DP,
-+            "widget_smart_key1b" to SmartLayout.KEY_ICON_DP,
-+            "widget_smart_key2a" to SmartLayout.KEY_ICON_DP,
-+            "widget_smart_key2b" to SmartLayout.KEY_ICON_DP,
-+            "widget_smart_refresh" to SmartLayout.KEY_ICON_DP,
-+        )
++        val expected = buildMap {
++            put("widget_smart_label1", SmartLayout.BLOCK_LEAD_DP)
++            put("widget_smart_title1", SmartLayout.BLOCK_TITLE_DP)
++            put("widget_smart_status1", SmartLayout.BLOCK_STATUS_DP)
++            put("widget_smart_detail1", SmartLayout.BLOCK_DETAIL_DP)
++            put("widget_smart_detail1b", SmartLayout.BLOCK_DETAIL_DP)
++            put("widget_smart_label2", SmartLayout.BLOCK_LEAD_DP)
++            put("widget_smart_title2", SmartLayout.BLOCK_TITLE_DP)
++            put("widget_smart_status2", SmartLayout.BLOCK_STATUS_DP)
++            put("widget_smart_detail2", SmartLayout.BLOCK_DETAIL_DP)
++            put("widget_smart_detail2b", SmartLayout.BLOCK_DETAIL_DP)
++            put("widget_smart_bottom_divider", SmartLayout.DIVIDER_DP)
++            put("widget_smart_key1a", SmartLayout.KEY_ICON_DP)
++            put("widget_smart_key1b", SmartLayout.KEY_ICON_DP)
++            put("widget_smart_key2a", SmartLayout.KEY_ICON_DP)
++            put("widget_smart_key2b", SmartLayout.KEY_ICON_DP)
++            put("widget_smart_refresh", SmartLayout.KEY_ICON_DP)
++        }
 +        for (name in both) {
 +            val actual = rowHeights(layout(name))
 +            expected.forEach { (id, dp) -> assertEquals("$name 的 $id 行高", dp, actual[id]) }
