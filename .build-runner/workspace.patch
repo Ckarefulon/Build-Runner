@@ -993,10 +993,10 @@ index 5840d6b5..9caea58e 100644
      }
 diff --git a/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
 new file mode 100644
-index 00000000..4780a750
+index 00000000..5aa0b0f8
 --- /dev/null
 +++ b/app/src/main/java/com/xjtu/toolbox/widget/smart/SmartArbiter.kt
-@@ -0,0 +1,605 @@
+@@ -0,0 +1,611 @@
 +package com.xjtu.toolbox.widget.smart
 +
 +import com.xjtu.toolbox.attendance.WaterType
@@ -1097,31 +1097,33 @@ index 00000000..4780a750
 +        val current = facts.courses.firstOrNull { now >= it.startMinute - CLASS_LEAD_MIN && now < it.endMinute }
 +        val next = facts.courses.firstOrNull { it.startMinute > now }
 +        val todo = facts.todos.minByOrNull { it.expiresAt.takeIf { e -> e > 0 } ?: Long.MAX_VALUE }
++        val todoLeft = todo?.let { minutesLeft(facts, it) } ?: Int.MAX_VALUE
 +        val outcome = current?.let { attendanceOf(facts, it) }
 +        val out = mutableListOf<SmartBlock>()
 +
-+        // 1 / 1b 打卡窗口已关而且本机没记录：这是唯一一个 P0 的「此刻不做就出事」。
++        // 1 打卡窗口已关而且本机没记录：唯一一个 P0 的「此刻不做就出事」。
 +        if (current != null && outcome != null && outcome.closed && !outcome.recorded && !outcome.swiped) {
 +            out += classBlock(facts, current, outcome).copy(rank = SmartRank.P0)
 +        }
 +
-+        // 2 当前课进行中（含课前二十分钟）。
++        // 2 两小时内截止的待办：过期即作废。
++        if (todo != null && todoLeft in 0..TODO_P0_MIN) {
++            out += todoBlock(facts, todo).copy(rank = SmartRank.P0)
++        }
++
++        // 3 座位「待入馆签到」：硬窗口，丢了就是丢了 —— 排在课前面。
++        facts.library?.takeIf { it.active && it.has("入馆签到") }?.let { out += libraryBlock(facts, it) }
++
++        // 4 当前课进行中（含课前二十分钟）。
 +        if (current != null && outcome != null) out += classBlock(facts, current, outcome)
 +
-+        // 3 待办：两小时内截止是 P0，六小时内是 P1。截止时间本身是时效，不用再标。
-+        todo?.let { t ->
-+            val left = minutesLeft(facts, t)
-+            if (left in 0..TODO_P1_MIN) {
-+                out += todoBlock(facts, t).copy(rank = if (left <= TODO_P0_MIN) SmartRank.P0 else SmartRank.P1)
-+            }
-+        }
++        // 5 六小时内截止的待办。
++        if (todo != null && todoLeft in 0..TODO_P1_MIN) out += todoBlock(facts, todo)
 +
-+        // 4 座位：签到 > 返回 > 在馆（硬窗口丢了就是丢了）。
-+        facts.library?.let { lib ->
-+            if (lib.active) out += libraryBlock(facts, lib)
-+        }
++        // 6 其它座位状态（在馆 / 暂离 / 已约未签到之外的）。
++        facts.library?.takeIf { it.active }?.let { out += libraryBlock(facts, it) }
 +
-+        // 5 / 6 下一节课：到了该出发的时刻就染黄，两小时内就占一块。
++        // 7 / 8 下一节课：到了该出发的时刻就染黄，两小时内就占一块。
 +        if (next != null) {
 +            val lead = next.startMinute - now
 +            val walk = facts.walkMinutesTo(next)
@@ -1132,12 +1134,12 @@ index 00000000..4780a750
 +            }
 +        }
 +
-+        // 7 饭点：上面已经短路掉「有课」的情况，到这里说明没课。
++        // 9 饭点：有课时它只配当底部那条提示，所以按 P2 排（文档的「课 > 饭点」）。
 +        MEALS.firstOrNull { (_, start, end) -> now in start until end }?.let { (label, _, _) ->
-+            out += mealBlock(facts, label)
++            out += mealBlock(facts, label).copy(rank = SmartRank.P2)
 +        }
 +
-+        // 8 课表变动：学校改课不通知，白跑一趟。
++        // 10 课表变动：学校改课不通知，白跑一趟。
 +        facts.scheduleDiff?.takeIf { it.isNotBlank() }?.let { diff ->
 +            out += SmartBlock(
 +                module = SmartModule.SCHEDULE_DIFF,
@@ -1149,7 +1151,7 @@ index 00000000..4780a750
 +            )
 +        }
 +
-+        // 9 三天内有考试。
++        // 11 三天内有考试。
 +        facts.exam?.let { e ->
 +            if (e.daysLeft <= 3) {
 +                out += SmartBlock(
@@ -1165,16 +1167,16 @@ index 00000000..4780a750
 +            }
 +        }
 +
-+        // 10 放假 / 今天没课 / 今天的课上完了。
++        // 12 放假 / 今天没课 / 今天的课上完了。
 +        val holiday = facts.holiday
 +        if (holiday != null || facts.courses.isEmpty() || facts.courses.all { it.endMinute <= now }) {
 +            out += holidayBlock(facts, holiday)
 +        }
 +
-+        // 11 兜底：余额。
++        // 13 兜底：余额。
 +        if (out.isEmpty()) out += balanceBlock(facts)
 +
-+        // 一个模块只占一个块；顺手把它自己的快捷键挂上。
++        // 一个模块只占一个块（保留最先出现、也就是更重要的那个）；顺手挂上它自己的快捷键。
 +        return out.distinctBy { it.module }.map { it.copy(keys = keysOf(it, facts)) }
 +    }
 +
@@ -1378,8 +1380,12 @@ index 00000000..4780a750
 +        } else {
 +            listOf(NavKey(SmartKeyKind.PAYMENT, "付款码", AppRoute.PaymentCode))
 +        }
-+        // 放假点块进校历 ⇒ 补日程；考试与课表变动点块就进日程，没有别的去处
-+        SmartModule.HOLIDAY -> listOf(NavKey(SmartKeyKind.CALENDAR, "日程", AppRoute.Schedule))
++        // 放假 / 今天没课点块进校历 ⇒ 补日程；「今天的课上完了」点块进校园卡 ⇒ 补付款码
++        SmartModule.HOLIDAY -> if (block.route == AppRoute.SchoolCalendar) {
++            listOf(NavKey(SmartKeyKind.CALENDAR, "日程", AppRoute.Schedule))
++        } else {
++            listOf(NavKey(SmartKeyKind.PAYMENT, "付款码", AppRoute.PaymentCode))
++        }
 +        SmartModule.EXAM, SmartModule.SCHEDULE_DIFF, SmartModule.NOTICE -> emptyList()
 +    }
 +
@@ -3879,10 +3885,10 @@ index 00000000..37586e21
 +}
 diff --git a/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
 new file mode 100644
-index 00000000..efe3bcfd
+index 00000000..f435c3e1
 --- /dev/null
 +++ b/app/src/test/java/com/xjtu/toolbox/widget/SmartWidgetLayoutBudgetTest.kt
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,154 @@
 +package com.xjtu.toolbox.widget
 +
 +import com.xjtu.toolbox.widget.smart.SmartLayout
@@ -3932,7 +3938,6 @@ index 00000000..efe3bcfd
 +            "widget_smart_title2" to SmartLayout.BLOCK_TITLE_DP,
 +            "widget_smart_status2" to SmartLayout.BLOCK_STATUS_DP,
 +            "widget_smart_detail2" to SmartLayout.BLOCK_DETAIL_DP,
-+            "widget_smart_divider" to SmartLayout.DIVIDER_DP,
 +            "widget_smart_bottom_divider" to SmartLayout.DIVIDER_DP,
 +            "widget_smart_key1a" to SmartLayout.KEY_ICON_DP,
 +            "widget_smart_key1b" to SmartLayout.KEY_ICON_DP,
@@ -3943,6 +3948,17 @@ index 00000000..efe3bcfd
 +        for (name in both) {
 +            val actual = rowHeights(layout(name))
 +            expected.forEach { (id, dp) -> assertEquals("$name 的 $id 行高", dp, actual[id]) }
++        }
++    }
++
++    @Test
++    fun `两块之间那条分隔线是 1dp`() {
++        // 紧凑卡里它是横线（高度 1dp），宽卡里它是竖线（宽度 1dp）—— 厚度必须都是 1dp
++        for (name in both) {
++            val text = layout(name).readText()
++            val element = Regex("""<ImageView\s+android:id="@\+id/widget_smart_divider"([^>]*)>""")
++                .find(text)?.groupValues?.get(1) ?: error("$name 找不到分隔线")
++            assertTrue("$name 分隔线要是 1dp 粗", element.contains("\"${SmartLayout.DIVIDER_DP}dp\""))
 +        }
 +    }
 +
